@@ -15,6 +15,8 @@ export const goals = sqliteTable("goals", {
   targetDate: text("target_date").notNull(),
   priority: integer("priority").notNull(),
   successCriteria: text("success_criteria").notNull(),
+  /** GoalTargetMetrics — see shared/goal.ts. */
+  targetMetricsJson: text("target_metrics_json").notNull().default("{}"),
   /** GoalConstraint[] — see shared/goal.ts. */
   constraintsJson: text("constraints_json").notNull().default("[]"),
   active: integer("active", { mode: "boolean" }).notNull().default(true),

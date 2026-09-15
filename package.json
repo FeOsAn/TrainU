@@ -8,7 +8,7 @@
     "build": "vite build && esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outfile=dist/index.js",
     "start": "NODE_ENV=production node dist/index.js",
     "check": "tsc",
-    "test": "node --import tsx --test shared/*.test.ts shared/predictors/*.test.ts server/*.test.ts",
+    "test": "node --import tsx --test shared/*.test.ts shared/predictors/*.test.ts shared/arbitration/*.test.ts server/*.test.ts",
     "db:push": "drizzle-kit push"
   },
   "dependencies": {

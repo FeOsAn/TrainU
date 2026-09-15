@@ -1,0 +1,110 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { DEFAULT_ATHLETE } from "../athlete";
+import { measured } from "../measured";
+import type { Goal } from "../goal";
+import { arbitratePlan, arbitrateWeek } from "./arbitrate";
+
+function goal(over: Partial<Goal>): Goal {
+  return {
+    id: "g",
+    type: "endurance_race",
+    label: "Goal",
+    targetDate: "2027-06-01",
+    priority: 1,
+    successCriteria: "",
+    targetMetrics: {},
+    constraints: [],
+    createdAt: "2026-01-01T00:00:00.000Z",
+    active: true,
+    ...over,
+  };
+}
+
+test("a single active goal produces no conflicts", () => {
+  const week = arbitrateWeek([goal({ id: "a" })], "2026-09-15", DEFAULT_ATHLETE);
+  assert.equal(week.conflicts.length, 0);
+  assert.equal(week.goalPhases.length, 1);
+});
+
+test("an inactive goal is excluded entirely", () => {
+  const week = arbitrateWeek([goal({ id: "a", active: false })], "2026-09-15", DEFAULT_ATHLETE);
+  assert.equal(week.goalPhases.length, 0);
+});
+
+test("two goals that both want elevated load but don't directly oppose produce no load conflict", () => {
+  // strength accumulation (1.1x, surplus) far from its date + an endurance
+  // base phase (1.0x, maintenance) far from its date — both mild, no clash.
+  const week = arbitrateWeek(
+    [goal({ id: "a", type: "strength", targetDate: "2027-06-01" }), goal({ id: "b", type: "endurance_race", targetDate: "2027-09-01" })],
+    "2026-09-15",
+    DEFAULT_ATHLETE,
+  );
+  assert.equal(week.conflicts.length, 0);
+});
+
+test("a genuine load conflict is surfaced: race build (elevated) vs. body-comp cut (reduced)", () => {
+  const athlete = { ...DEFAULT_ATHLETE, weightKg: measured(80, "scale") };
+  const race = goal({ id: "race", type: "endurance_race", targetDate: "2026-11-15", priority: 2 }); // ~9 weeks out — build phase, 1.15x
+  const wedding = goal({ id: "wedding", type: "body_composition", targetDate: "2026-11-01", priority: 1, targetMetrics: { targetWeightKg: 76 } }); // cut active, 0.9x
+  const week = arbitrateWeek([race, wedding], "2026-09-15", athlete);
+
+  const loadConflict = week.conflicts.find((c) => c.betweenGoalIds.includes("race") && c.betweenGoalIds.includes("wedding"));
+  assert.ok(loadConflict, "expected a load conflict between the two goals pulling in opposite directions");
+  // Blended load must sit strictly between the two raw asks (0.9 and 1.15) — not equal to either.
+  assert.ok(week.loadMultiplier > 0.9 && week.loadMultiplier < 1.15);
+  // Wedding is higher priority (1 < 2), so it should win the resolution.
+  const isWeddingA = loadConflict!.betweenGoalIds[0] === "wedding";
+  assert.equal(loadConflict!.resolution, isWeddingA ? "goal_a_priority" : "goal_b_priority");
+});
+
+test("nutrition conflict: a surplus goal and a deficit goal directly contradict, priority wins", () => {
+  const athlete = { ...DEFAULT_ATHLETE, weightKg: measured(80, "scale") };
+  const bulk = goal({ id: "bulk", type: "strength", targetDate: "2027-06-01", priority: 3 }); // accumulation surplus
+  const cut = goal({ id: "cut", type: "body_composition", targetDate: "2026-11-01", priority: 1, targetMetrics: { targetWeightKg: 76 } }); // deficit, higher priority
+  const week = arbitrateWeek([bulk, cut], "2026-09-15", athlete);
+
+  assert.equal(week.nutritionStance, "deficit", "the higher-priority (lower number) goal's nutrition stance must win");
+  const nutritionConflict = week.conflicts.find((c) => c.betweenGoalIds.includes("bulk") && c.betweenGoalIds.includes("cut"));
+  assert.ok(nutritionConflict, "a direct surplus/deficit contradiction must be surfaced, not silently resolved");
+});
+
+test("the canonical example: Ironman nine months out + a wedding six weeks out", () => {
+  const athlete = { ...DEFAULT_ATHLETE, weightKg: measured(82, "scale, 15 Sep") };
+  const today = "2026-09-15";
+  const ironman = goal({ id: "ironman", type: "endurance_race", label: "Ironman 70.3", targetDate: "2027-06-15", priority: 2 }); // ~39 weeks out
+  const wedding = goal({ id: "wedding", type: "body_composition", label: "Wedding", targetDate: "2026-10-27", priority: 1, targetMetrics: { targetWeightKg: 78 } }); // ~6 weeks out, 4kg to lose
+
+  const plan = arbitratePlan([ironman, wedding], today, "2026-12-01", athlete);
+
+  const beforeWedding = plan.weeks.find((w) => w.date === today)!;
+  const afterWedding = plan.weeks.find((w) => w.date > "2026-10-27")!;
+
+  // "still train hard for the Ironman" during the cut: base-phase load
+  // shouldn't collapse just because a deficit is running.
+  assert.equal(beforeWedding.goalPhases.find((p) => p.goalId === "ironman")!.phaseName, "base");
+  assert.ok(beforeWedding.loadMultiplier >= 0.85, "the Ironman goal should keep the week's load from dropping too far during the cut");
+
+  // "go on a cut" — nutrition must actually reflect the deficit while the
+  // wedding's safe-rate window is active.
+  const cutWeek = plan.weeks.find((w) => w.goalPhases.some((p) => p.goalId === "wedding" && p.phaseName === "cut"));
+  assert.ok(cutWeek, "expected the wedding goal to enter a cut phase before its date");
+  assert.equal(cutWeek!.nutritionStance, "deficit");
+
+  // "once the wedding is done, back to eating more and pushing more" —
+  // after the target date the body-composition goal reports 'past', and
+  // nutrition reverts since nothing else is asking for a deficit.
+  assert.equal(afterWedding.goalPhases.find((p) => p.goalId === "wedding")!.phaseName, "past");
+  assert.equal(afterWedding.nutritionStance, "maintenance");
+});
+
+test("arbitratePlan merges the same conflict across contiguous weeks into one window", () => {
+  const athlete = { ...DEFAULT_ATHLETE, weightKg: measured(80, "scale") };
+  const race = goal({ id: "race", type: "endurance_race", targetDate: "2026-12-01", priority: 2 });
+  const cut = goal({ id: "cut", type: "body_composition", targetDate: "2026-11-15", priority: 1, targetMetrics: { targetWeightKg: 76 } });
+  const plan = arbitratePlan([race, cut], "2026-09-15", "2026-11-15", athlete);
+
+  const pairConflicts = plan.conflicts.filter((c) => c.betweenGoalIds.includes("race") && c.betweenGoalIds.includes("cut"));
+  assert.ok(pairConflicts.length >= 1, "expected at least one merged conflict window for this goal pair");
+  assert.ok(pairConflicts.length < plan.weeks.length, "weekly conflicts for the same pair must be merged, not repeated once per week");
+});

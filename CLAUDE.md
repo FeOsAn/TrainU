@@ -65,10 +65,24 @@ causes a support conversation.
   fixture available in this environment) — the extraction logic is a
   faithful port of sub5-dashboard's already-proven `fitUpload.ts`, but treat
   the first real upload as the actual first test of that path.
-- **Phase 3** — the goal-arbitration scheduler itself. Takes 2+ active goals
-  and produces one plan, surfacing conflicts explicitly (marathon volume vs.
-  a pre-wedding deficit) rather than picking a winner silently. This is the
-  actual differentiator and gets the most design attention.
+- **Phase 3 (done)** — `shared/arbitration/goalPhase.ts` computes what each
+  goal wants in isolation (base/build/peak/taper for races, a cut/lean-gain
+  window for body-composition goals derived directly from Phase 2's
+  `predictBodyComposition` — no duplicated safe-rate logic).
+  `shared/arbitration/arbitrate.ts` blends N goals' phases into one weekly
+  instruction: a priority-weighted training-load multiplier, one resolved
+  nutrition stance, and an explicit `GoalConflict` whenever two goals
+  genuinely pull apart (a direct surplus/deficit contradiction, or load asks
+  more than 0.15 apart) — contiguous weekly conflicts between the same pair
+  get merged into one span by `arbitratePlan` rather than repeating weekly.
+  `GET /api/plan/arbitrate` exposes it. Verified end-to-end against the
+  canonical example: an Ironman 9 months out + a wedding 6 weeks out keeps
+  the Ironman in base phase (not silently paused) while the wedding runs a
+  deficit, and both revert to maintenance the week after the wedding date
+  passes. 68 tests, `tsc` clean.
+  `Goal` gained a `targetMetrics` field (structured numbers — target weight,
+  body-fat %, lift id) since `successCriteria` is free text and the
+  predictors/arbitration need real numbers to compute against.
 - **Phase 4** — conversational onboarding: ask clarifying questions (goals,
   priorities, deadlines, connector toggles) until there's enough to
   generate a first plan.

@@ -16,6 +16,7 @@ import { predictRunRace, predictTriathlon, TRIATHLON_DISTANCES, type TriathlonDi
 import { predictHyrox } from "@shared/predictors/hyrox";
 import { predictBodyComposition } from "@shared/predictors/bodyComposition";
 import { predictStrength, type LiftId } from "@shared/predictors/strength";
+import { arbitratePlan } from "@shared/arbitration/arbitrate";
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
@@ -63,6 +64,7 @@ function rowToGoal(row: typeof goals.$inferSelect): Goal {
     targetDate: row.targetDate,
     priority: row.priority,
     successCriteria: row.successCriteria,
+    targetMetrics: JSON.parse(row.targetMetricsJson),
     constraints: JSON.parse(row.constraintsJson),
     active: row.active,
     createdAt: row.createdAt,
@@ -137,6 +139,7 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
       targetDate: body.targetDate,
       priority: body.priority ?? 1,
       successCriteria: body.successCriteria,
+      targetMetrics: body.targetMetrics ?? {},
       constraints: body.constraints ?? [],
       createdAt: new Date().toISOString(),
       active: true,
@@ -149,6 +152,7 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
         targetDate: goal.targetDate,
         priority: goal.priority,
         successCriteria: goal.successCriteria,
+        targetMetricsJson: JSON.stringify(goal.targetMetrics),
         constraintsJson: JSON.stringify(goal.constraints),
         active: goal.active,
         createdAt: goal.createdAt,
@@ -277,5 +281,22 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
     const prediction = predictStrength(getAthleteParams(), lift, targetDate);
     logPrediction("prediction:strength", goalId ?? null, prediction);
     res.json(prediction);
+  });
+
+  // ─── Goal arbitration (Phase 3) ─────────────────────────────────────────
+  app.get("/api/plan/arbitrate", (req, res) => {
+    const today = new Date().toISOString().slice(0, 10);
+    const from = typeof req.query.from === "string" ? req.query.from : today;
+    const activeGoals = db.select().from(goals).where(eq(goals.active, true)).all().map(rowToGoal);
+    const defaultTo = activeGoals.length
+      ? activeGoals.reduce((latest, g) => (g.targetDate > latest ? g.targetDate : latest), from)
+      : from;
+    const to = typeof req.query.to === "string" ? req.query.to : defaultTo;
+    if (activeGoals.length === 0) {
+      return res.json({ fromDate: from, toDate: to, weeks: [], conflicts: [] });
+    }
+    const plan = arbitratePlan(activeGoals, from, to, getAthleteParams());
+    logPrediction("plan:arbitration", null, plan);
+    res.json(plan);
   });
 }

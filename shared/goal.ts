@@ -15,6 +15,21 @@ export interface GoalConstraint {
   toDate?: string;
 }
 
+/**
+ * The structured numbers Phase 3's arbitration engine and Phase 2's
+ * predictors actually need to compute against — kept separate from
+ * successCriteria (which stays free text for the athlete to read back)
+ * because "sub-3:30" and "3:30:00" are the same target but neither parses
+ * reliably out of prose.
+ */
+export interface GoalTargetMetrics {
+  targetTimeSeconds?: number;
+  targetDistanceKm?: number;
+  targetWeightKg?: number;
+  targetBodyFatPercent?: number;
+  liftId?: "squat1RmKg" | "deadlift1RmKg" | "bench1RmKg" | "ohp1RmKg";
+}
+
 export interface Goal {
   id: string;
   type: GoalType;
@@ -25,6 +40,8 @@ export interface Goal {
   priority: number;
   /** What "success" means here — free text, since a race time, a look, and a lift number don't share a unit. */
   successCriteria: string;
+  /** The subset of successCriteria that's actually a number to compute against. */
+  targetMetrics: GoalTargetMetrics;
   constraints: GoalConstraint[];
   createdAt: string;
   active: boolean;
