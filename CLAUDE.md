@@ -83,9 +83,32 @@ causes a support conversation.
   `Goal` gained a `targetMetrics` field (structured numbers — target weight,
   body-fat %, lift id) since `successCriteria` is free text and the
   predictors/arbitration need real numbers to compute against.
-- **Phase 4** — conversational onboarding: ask clarifying questions (goals,
-  priorities, deadlines, connector toggles) until there's enough to
-  generate a first plan.
+- **Phase 4 (done)** — `server/onboarding.ts`: a tool-calling chat (Claude
+  Sonnet 5, `@anthropic-ai/sdk`) that asks clarifying questions one or two
+  at a time and calls `create_goal` once it has enough — copying the two
+  rules HyroxNga's `llmCoach.ts` already proved out: tools do the writing
+  with real server-side validation regardless of what the tool schema
+  promised (`server/goalValidation.ts`, DB-free and independently tested —
+  a hallucinated goal type or a mangled date is rejected the same way a bad
+  form submission would be), and the model never claims an action a tool
+  result didn't verify (retry/fallback/closing-call logic ported from
+  `llmCoach.ts`'s `createWithRetry`). Also asks once about connector intent
+  (Garmin/Whoop/Apple — `set_connector_preferences`) and optional features
+  (`set_feature_preferences`); actual OAuth wiring is Phase 5. `create_goal`
+  and the REST `POST /api/goals` now share one write path
+  (`server/goalsService.ts`) instead of two that could drift apart.
+  `POST /api/onboarding/chat` / `GET /api/onboarding/history` /
+  `GET+PATCH /api/preferences*`. Degrades to a plain "set ANTHROPIC_API_KEY"
+  message if the key's missing, rather than crashing.
+  81 tests, `tsc` clean. **Caveat**: no ANTHROPIC_API_KEY is available in
+  this environment, so the actual multi-turn tool-calling conversation is
+  unverified beyond the no-key path and the tool-dispatch logic tested in
+  isolation (`server/onboarding.test.ts`) — the first real conversation is
+  the real test of the prompt/flow itself.
+  Test suite now runs against a disposable `trainu.test.db`
+  (`DB_PATH` env var, wired through `drizzle.config.ts` and
+  `pretest`/`posttest`) instead of the dev database, so `npm test` is
+  reproducible from a clean checkout and never pollutes real dev data.
 - **Phase 5** — Garmin/Whoop/Apple Health connectors.
 - **Phase 6** — wire `outcomeLog` into an actual calibration loop: when the
   app says "high confidence," is it right more often than "low confidence"?

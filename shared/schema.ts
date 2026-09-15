@@ -65,6 +65,22 @@ export const trainingSessions = sqliteTable("training_sessions", {
   externalId: text("external_id"),
 });
 
+/** The onboarding chat's transcript — single-athlete app, so one linear history rather than a per-conversation table. */
+export const chatMessages = sqliteTable("chat_messages", {
+  id: text("id").primaryKey(),
+  role: text("role").notNull(),
+  content: text("content").notNull(),
+  createdAt: text("created_at").notNull(),
+});
+
+/** One row (id "self"). See shared/preferences.ts for the shapes of connectorsJson/featuresJson. */
+export const preferences = sqliteTable("preferences", {
+  id: text("id").primaryKey(),
+  connectorsJson: text("connectors_json").notNull().default("{}"),
+  featuresJson: text("features_json").notNull().default("{}"),
+  updatedAt: text("updated_at").notNull(),
+});
+
 /**
  * The outcome-data log: every prediction or plan decision the app makes,
  * paired with what actually happened once it's known. This is the asset the

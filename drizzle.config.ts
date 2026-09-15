@@ -5,6 +5,6 @@ export default defineConfig({
   schema: "./shared/schema.ts",
   dialect: "sqlite",
   dbCredentials: {
-    url: "./trainu.db",
+    url: process.env.DB_PATH ?? "./trainu.db",
   },
 });

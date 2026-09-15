@@ -4,8 +4,7 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import multer from "multer";
 import { db } from "./db";
-import { athleteMeasurements, goals, outcomeLog, trainingSessions } from "@shared/schema";
-import type { Goal } from "@shared/goal";
+import { athleteMeasurements, chatMessages, outcomeLog, trainingSessions } from "@shared/schema";
 import { type AthleteParams, type AthleteRow, athleteParamsFromRow, withinBounds } from "@shared/athlete";
 import { measured } from "@shared/measured";
 import type { Sport, TrainingSession } from "@shared/session";
@@ -17,6 +16,9 @@ import { predictHyrox } from "@shared/predictors/hyrox";
 import { predictBodyComposition } from "@shared/predictors/bodyComposition";
 import { predictStrength, type LiftId } from "@shared/predictors/strength";
 import { arbitratePlan } from "@shared/arbitration/arbitrate";
+import { createGoal, InvalidGoalError, listGoals } from "./goalsService";
+import { chatOnboarding } from "./onboarding";
+import { getPreferences, updateConnectorPreferences, updateFeaturePreferences } from "./preferencesService";
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
@@ -54,21 +56,6 @@ function logPrediction(kind: string, goalId: string | null, prediction: unknown)
       observedAt: null,
     })
     .run();
-}
-
-function rowToGoal(row: typeof goals.$inferSelect): Goal {
-  return {
-    id: row.id,
-    type: row.type as Goal["type"],
-    label: row.label,
-    targetDate: row.targetDate,
-    priority: row.priority,
-    successCriteria: row.successCriteria,
-    targetMetrics: JSON.parse(row.targetMetricsJson),
-    constraints: JSON.parse(row.constraintsJson),
-    active: row.active,
-    createdAt: row.createdAt,
-  };
 }
 
 function rowToSession(row: typeof trainingSessions.$inferSelect): TrainingSession {
@@ -124,41 +111,16 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
 
   // ─── Goals (Phase 1) ────────────────────────────────────────────────────
   app.get("/api/goals", (_req, res) => {
-    res.json(db.select().from(goals).all().map(rowToGoal));
+    res.json(listGoals());
   });
 
   app.post("/api/goals", (req, res) => {
-    const body = req.body as Partial<Goal>;
-    if (!body.type || !body.label || !body.targetDate || !body.successCriteria) {
-      return res.status(400).json({ error: "type, label, targetDate, successCriteria are required" });
+    try {
+      res.status(201).json(createGoal(req.body ?? {}));
+    } catch (e) {
+      if (e instanceof InvalidGoalError) return res.status(400).json({ error: e.message });
+      throw e;
     }
-    const goal: Goal = {
-      id: randomUUID(),
-      type: body.type,
-      label: body.label,
-      targetDate: body.targetDate,
-      priority: body.priority ?? 1,
-      successCriteria: body.successCriteria,
-      targetMetrics: body.targetMetrics ?? {},
-      constraints: body.constraints ?? [],
-      createdAt: new Date().toISOString(),
-      active: true,
-    };
-    db.insert(goals)
-      .values({
-        id: goal.id,
-        type: goal.type,
-        label: goal.label,
-        targetDate: goal.targetDate,
-        priority: goal.priority,
-        successCriteria: goal.successCriteria,
-        targetMetricsJson: JSON.stringify(goal.targetMetrics),
-        constraintsJson: JSON.stringify(goal.constraints),
-        active: goal.active,
-        createdAt: goal.createdAt,
-      })
-      .run();
-    res.status(201).json(goal);
   });
 
   // ─── Athlete measurements (Phase 2) ────────────────────────────────────
@@ -287,7 +249,7 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
   app.get("/api/plan/arbitrate", (req, res) => {
     const today = new Date().toISOString().slice(0, 10);
     const from = typeof req.query.from === "string" ? req.query.from : today;
-    const activeGoals = db.select().from(goals).where(eq(goals.active, true)).all().map(rowToGoal);
+    const activeGoals = listGoals().filter((g) => g.active);
     const defaultTo = activeGoals.length
       ? activeGoals.reduce((latest, g) => (g.targetDate > latest ? g.targetDate : latest), from)
       : from;
@@ -298,5 +260,48 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
     const plan = arbitratePlan(activeGoals, from, to, getAthleteParams());
     logPrediction("plan:arbitration", null, plan);
     res.json(plan);
+  });
+
+  // ─── Onboarding chat (Phase 4) ──────────────────────────────────────────
+  app.get("/api/onboarding/history", (_req, res) => {
+    res.json(
+      db
+        .select()
+        .from(chatMessages)
+        .all()
+        .map((r) => ({ role: r.role, content: r.content, createdAt: r.createdAt })),
+    );
+  });
+
+  app.post("/api/onboarding/chat", async (req, res) => {
+    const { message } = req.body as { message?: string };
+    if (!message?.trim()) return res.status(400).json({ error: "message is required" });
+
+    const history = db
+      .select()
+      .from(chatMessages)
+      .all()
+      .map((r) => ({ role: r.role as "user" | "assistant", content: r.content }));
+
+    const result = await chatOnboarding(message, history);
+
+    const now = new Date().toISOString();
+    db.insert(chatMessages).values({ id: randomUUID(), role: "user", content: message, createdAt: now }).run();
+    db.insert(chatMessages).values({ id: randomUUID(), role: "assistant", content: result.reply, createdAt: new Date().toISOString() }).run();
+
+    res.json(result);
+  });
+
+  // ─── Preferences (Phase 4) ──────────────────────────────────────────────
+  app.get("/api/preferences", (_req, res) => {
+    res.json(getPreferences());
+  });
+
+  app.patch("/api/preferences/connectors", (req, res) => {
+    res.json(updateConnectorPreferences(req.body ?? {}));
+  });
+
+  app.patch("/api/preferences/features", (req, res) => {
+    res.json(updateFeaturePreferences(req.body ?? {}));
   });
 }
