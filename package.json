@@ -8,7 +8,7 @@
     "build": "vite build && esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outfile=dist/index.js",
     "start": "NODE_ENV=production node dist/index.js",
     "check": "tsc",
-    "test": "node --import tsx --test shared/*.test.ts",
+    "test": "node --import tsx --test shared/*.test.ts shared/predictors/*.test.ts server/*.test.ts",
     "db:push": "drizzle-kit push"
   },
   "dependencies": {
@@ -17,6 +17,8 @@
     "drizzle-orm": "^0.45.2",
     "drizzle-zod": "^0.7.0",
     "express": "^5.0.1",
+    "fit-file-parser": "^3.0.2",
+    "multer": "^2.2.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "wouter": "^3.3.5",
@@ -30,6 +32,7 @@
     "@vitejs/plugin-react": "^4.7.0",
     "better-sqlite3": "^11.7.0",
     "@types/better-sqlite3": "^7.6.12",
+    "@types/multer": "^2.1.0",
     "drizzle-kit": "^0.31.8",
     "esbuild": "^0.25.0",
     "tsx": "^4.20.5",

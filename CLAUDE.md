@@ -44,9 +44,27 @@ causes a support conversation.
   (`shared/measured.ts`), outcome-log schema (`shared/schema.ts`:
   `outcomeLog`). A thin `/api/goals` CRUD slice exists so Phase 4 has
   something to write to.
-- **Phase 2** — port training-load, calibration/provenance, dedupe, and
-  Garmin/Whoop ingestion from the sibling apps, generalized into per-goal-
-  type prediction modules that all consume `Measured<AthleteParams>`.
+- **Phase 2 (done)** — `shared/athlete.ts` (generalized `Measured<AthleteParams>`
+  across all goal types), `shared/trainingLoad.ts` (CTL/ATL/TSB, sport-
+  agnostic), `shared/calibration.ts` (provenance-tracked running calibration
+  + a generic `calibrateBenchmark()` replacing what would've been one
+  bespoke function per station/test), `shared/sessionDedupe.ts` (cross-
+  source duplicate detection), `server/fitIngest.ts` (FIT upload), and four
+  per-goal-type predictors under `shared/predictors/`: `enduranceRace.ts`
+  (running + triathlon), `hyrox.ts`, `bodyComposition.ts`, `strength.ts` —
+  every one reads `Measured<AthleteParams>` and widens its confidence band
+  by how much of its input is still guessed, closing the CdA/SEI-shaped gap
+  this whole rewrite started from. 54 tests, `tsc` clean.
+  **Found and fixed a real bug during testing**: a malformed FIT upload
+  could make `fit-file-parser` block the entire Node event loop for 10+
+  seconds — confirmed by sending a concurrent request during a bad parse
+  and getting no response. Fixed by sniffing the FIT header before parsing
+  at all, and isolating the actual parse in a killable subprocess
+  (`server/fitParseWorker.ts`) so a bad file can never freeze the app for
+  everyone. Not yet verified against a real Garmin-exported .fit file (no
+  fixture available in this environment) — the extraction logic is a
+  faithful port of sub5-dashboard's already-proven `fitUpload.ts`, but treat
+  the first real upload as the actual first test of that path.
 - **Phase 3** — the goal-arbitration scheduler itself. Takes 2+ active goals
   and produces one plan, surfacing conflicts explicitly (marathon volume vs.
   a pre-wedding deficit) rather than picking a winner silently. This is the
@@ -66,5 +84,5 @@ causes a support conversation.
 npm install
 npm run dev     # http://localhost:5000
 npm run check   # tsc
-npm test        # shared/*.test.ts
+npm test        # shared/*.test.ts, shared/predictors/*.test.ts, server/*.test.ts
 ```

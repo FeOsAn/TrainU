@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
 
 /** Used by server/db.ts's foreign-database guard — see that file for why it exists. */
 export const APP_ID = "trainu";
@@ -32,6 +32,35 @@ export const athleteMeasurements = sqliteTable("athlete_measurements", {
   id: text("id").primaryKey(),
   fieldsJson: text("fields_json").notNull().default("{}"),
   updatedAt: text("updated_at").notNull(),
+});
+
+/**
+ * One physical activity per row — see shared/session.ts for the shape this
+ * mirrors. `externalId` plus (source, date) is the idempotency key sync
+ * jobs check before inserting, so a re-poll of the same Garmin activity
+ * doesn't need shared/sessionDedupe.ts's fuzzy matching at all; that fuzzy
+ * matching exists for the case dedupe can't sidestep — the SAME activity
+ * arriving from two DIFFERENT sources (Garmin's recording and Whoop's
+ * auto-detect of the same run).
+ */
+export const trainingSessions = sqliteTable("training_sessions", {
+  id: text("id").primaryKey(),
+  date: text("date").notNull(),
+  sport: text("sport").notNull(),
+  source: text("source").notNull(),
+  startTime: text("start_time"),
+  durationMinutes: integer("duration_minutes").notNull(),
+  distanceKm: real("distance_km"),
+  avgHeartRate: integer("avg_heart_rate"),
+  maxHeartRate: integer("max_heart_rate"),
+  avgPaceSecPerKm: integer("avg_pace_sec_per_km"),
+  avgPaceSecPer100m: integer("avg_pace_sec_per_100m"),
+  avgPowerWatts: integer("avg_power_watts"),
+  normalizedPower: integer("normalized_power"),
+  tss: real("tss"),
+  hrZonesJson: text("hr_zones_json"),
+  rpe: text("rpe"),
+  externalId: text("external_id"),
 });
 
 /**
