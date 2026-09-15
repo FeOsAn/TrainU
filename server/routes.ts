@@ -22,6 +22,7 @@ import { getPreferences, updateConnectorPreferences, updateFeaturePreferences } 
 import { connectGarmin, syncGarmin } from "./connectors/garmin";
 import { exchangeWhoopCode, getWhoopAuthorizationUrl, syncWhoop } from "./connectors/whoop";
 import { importAppleHealthExport } from "./connectors/appleHealth";
+import { getCalibrationMultiplier, getCalibrationReport, OutcomeNotFoundError, recordOutcome } from "./calibrationService";
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 const uploadLarge = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
@@ -48,10 +49,12 @@ function saveAthleteRow(row: AthleteRow): void {
   }
 }
 
-function logPrediction(kind: string, goalId: string | null, prediction: unknown): void {
+/** Returns the outcomeLog row's id — the caller needs it back to record the real outcome later via /api/outcomes/:id/record. */
+function logPrediction(kind: string, goalId: string | null, prediction: unknown): string {
+  const id = randomUUID();
   db.insert(outcomeLog)
     .values({
-      id: randomUUID(),
+      id,
       goalId,
       kind,
       predictedAt: new Date().toISOString(),
@@ -60,6 +63,7 @@ function logPrediction(kind: string, goalId: string | null, prediction: unknown)
       observedAt: null,
     })
     .run();
+  return id;
 }
 
 function rowToSession(row: typeof trainingSessions.$inferSelect): TrainingSession {
@@ -211,26 +215,26 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
   app.post("/api/predict/run", (req, res) => {
     const { distanceKm, goalMinutes, goalId } = req.body as { distanceKm: number; goalMinutes?: number; goalId?: string };
     if (typeof distanceKm !== "number" || distanceKm <= 0) return res.status(400).json({ error: "distanceKm is required" });
-    const prediction = predictRunRace(getAthleteParams(), distanceKm, goalMinutes);
-    logPrediction("prediction:run", goalId ?? null, prediction);
-    res.json(prediction);
+    const prediction = predictRunRace(getAthleteParams(), distanceKm, goalMinutes, getCalibrationMultiplier());
+    const outcomeId = logPrediction("prediction:run", goalId ?? null, prediction);
+    res.json({ ...prediction, outcomeId });
   });
 
   app.post("/api/predict/triathlon", (req, res) => {
     const { distance, goalMinutes, goalId } = req.body as { distance: keyof typeof TRIATHLON_DISTANCES | TriathlonDistances; goalMinutes?: number; goalId?: string };
     const distances = typeof distance === "string" ? TRIATHLON_DISTANCES[distance] : distance;
     if (!distances) return res.status(400).json({ error: "distance must be sprint|olympic|70.3|full or {swimKm,bikeKm,runKm}" });
-    const prediction = predictTriathlon(getAthleteParams(), distances, goalMinutes);
-    logPrediction("prediction:triathlon", goalId ?? null, prediction);
-    res.json(prediction);
+    const prediction = predictTriathlon(getAthleteParams(), distances, goalMinutes, getCalibrationMultiplier());
+    const outcomeId = logPrediction("prediction:triathlon", goalId ?? null, prediction);
+    res.json({ ...prediction, outcomeId });
   });
 
   app.post("/api/predict/hyrox", (req, res) => {
     const { goalSeconds, goalId } = req.body as { goalSeconds: number; goalId?: string };
     if (typeof goalSeconds !== "number" || goalSeconds <= 0) return res.status(400).json({ error: "goalSeconds is required" });
-    const prediction = predictHyrox(getAthleteParams(), goalSeconds);
-    logPrediction("prediction:hyrox", goalId ?? null, prediction);
-    res.json(prediction);
+    const prediction = predictHyrox(getAthleteParams(), goalSeconds, undefined, getCalibrationMultiplier());
+    const outcomeId = logPrediction("prediction:hyrox", goalId ?? null, prediction);
+    res.json({ ...prediction, outcomeId });
   });
 
   app.post("/api/predict/body-composition", (req, res) => {
@@ -360,5 +364,27 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
     const existing = db.select().from(trainingSessions).all().map(rowToSession);
     const result = importAppleHealthExport(req.file.buffer.toString("utf-8"), existing, insertSession);
     res.json(result);
+  });
+
+  // ─── Outcome recording & calibration (Phase 6) ──────────────────────────
+  // Every /api/predict/* call above already logged its prediction (see
+  // logPrediction). This is where the loop closes: once the real outcome is
+  // known — the race happened, the wedding came and went — record it here,
+  // and predict/run|triathlon|hyrox start reading getCalibrationMultiplier()
+  // on every future call.
+  app.post("/api/outcomes/:id/record", (req, res) => {
+    const { achieved, ...rest } = req.body as { achieved?: boolean; [k: string]: unknown };
+    if (typeof achieved !== "boolean") return res.status(400).json({ error: "achieved (boolean) is required in the body" });
+    try {
+      recordOutcome(req.params.id, { achieved, ...rest });
+      res.json({ ok: true });
+    } catch (e) {
+      if (e instanceof OutcomeNotFoundError) return res.status(404).json({ error: e.message });
+      throw e;
+    }
+  });
+
+  app.get("/api/calibration/report", (_req, res) => {
+    res.json(getCalibrationReport());
   });
 }

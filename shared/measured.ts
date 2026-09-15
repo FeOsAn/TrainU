@@ -60,9 +60,16 @@ export function assessConfidence(inputs: Record<string, Measured<unknown>>): Con
  * input is still guessed. A predictor built entirely on verified inputs gets
  * `base` back unchanged; one leaning on defaults gets a band wide enough to
  * stop the point estimate from reading as false precision.
+ *
+ * `calibrationMultiplier` is the Phase 6 feedback hook: shared/calibrationReport.ts
+ * computes it from logged predictions-vs-actual-outcomes (was "confident"
+ * actually right more often than not?) and the server threads it through —
+ * this file stays a pure function with no DB access, so it takes the number
+ * as a parameter rather than fetching it itself. Defaults to 1 (no
+ * adjustment) so every existing caller is unaffected until it opts in.
  */
-export function widenForConfidence(base: number, confidence: Confidence): number {
-  if (confidence.totalCount === 0) return base;
+export function widenForConfidence(base: number, confidence: Confidence, calibrationMultiplier = 1): number {
+  if (confidence.totalCount === 0) return Math.round(base * calibrationMultiplier);
   const guessedFraction = 1 - confidence.verifiedCount / confidence.totalCount;
-  return Math.round(base * (1 + guessedFraction * 1.5));
+  return Math.round(base * (1 + guessedFraction * 1.5) * calibrationMultiplier);
 }

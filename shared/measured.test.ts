@@ -46,3 +46,19 @@ test("widenForConfidence with no inputs at all returns the base unchanged", () =
   const c = assessConfidence({});
   assert.equal(widenForConfidence(5, c), 5);
 });
+
+test("widenForConfidence's calibrationMultiplier defaults to 1 — every existing caller is unaffected", () => {
+  const c = assessConfidence({ a: seeded(1), b: measured(2, "x") });
+  assert.equal(widenForConfidence(5, c), widenForConfidence(5, c, 1));
+});
+
+test("widenForConfidence applies the Phase 6 calibration multiplier on top of the confidence-based band", () => {
+  const c = assessConfidence({ a: measured(1, "x"), b: measured(2, "y") }); // fully verified, band = base
+  assert.equal(widenForConfidence(5, c, 2), 10);
+  assert.equal(widenForConfidence(5, c, 0.5), 3); // Math.round(5 * 1 * 0.5) = 3 (banker's rounding of 2.5 is fine either way)
+});
+
+test("widenForConfidence applies the calibration multiplier even with zero inputs", () => {
+  const c = assessConfidence({});
+  assert.equal(widenForConfidence(5, c, 2), 10);
+});

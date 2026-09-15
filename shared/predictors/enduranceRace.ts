@@ -48,7 +48,7 @@ const MARATHON_KM = 42.195;
 /** A trained runner's threshold pace sits close to their 15 km race pace. */
 const THRESHOLD_ANCHOR_KM = 15;
 
-export function predictRunRace(a: AthleteParams, distanceKm: number, goalMinutes?: number): RunRacePrediction {
+export function predictRunRace(a: AthleteParams, distanceKm: number, goalMinutes?: number, calibrationMultiplier = 1): RunRacePrediction {
   const pb = a.marathonPbMinutes;
   const threshold = a.runThresholdSecPerKm;
 
@@ -77,7 +77,7 @@ export function predictRunRace(a: AthleteParams, distanceKm: number, goalMinutes
 
   if (goalMinutes != null) {
     const point = goalProbabilityPoint(predictedTimeMinutes, goalMinutes);
-    const band = widenForConfidence(8, confidence);
+    const band = widenForConfidence(8, confidence, calibrationMultiplier);
     result.goalMinutes = goalMinutes;
     result.goalProbability = point;
     result.goalProbabilityLow = Math.max(1, point - band);
@@ -153,7 +153,7 @@ function calcSwimTimeMinutes(poolPaceSecPer100m: number, swimKm: number): number
   return ((poolPaceSecPer100m + 8) * lengths) / 60; // +8s/100m for open-water/sighting vs pool pace
 }
 
-export function predictTriathlon(a: AthleteParams, distances: TriathlonDistances, goalMinutes?: number): TriathlonPrediction {
+export function predictTriathlon(a: AthleteParams, distances: TriathlonDistances, goalMinutes?: number, calibrationMultiplier = 1): TriathlonPrediction {
   const { swimKm, bikeKm, runKm } = distances;
   const swimTimeMinutes = calcSwimTimeMinutes(a.cssSecPer100m.value, swimKm);
   const t1Minutes = 4.5;
@@ -189,7 +189,7 @@ export function predictTriathlon(a: AthleteParams, distances: TriathlonDistances
 
   if (goalMinutes != null) {
     const point = goalProbabilityPoint(totalTimeMinutes, goalMinutes);
-    const band = widenForConfidence(8, confidence);
+    const band = widenForConfidence(8, confidence, calibrationMultiplier);
     result.goalMinutes = goalMinutes;
     result.goalProbability = point;
     result.goalProbabilityLow = Math.max(1, point - band);

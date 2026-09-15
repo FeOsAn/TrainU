@@ -84,7 +84,7 @@ function goalProbabilityPoint(predictedSeconds: number, goalSeconds: number): nu
   return Math.max(1, Math.min(99, raw));
 }
 
-export function predictHyrox(a: AthleteParams, goalSeconds: number, roxzoneOverride?: Measured<number>): HyroxPrediction {
+export function predictHyrox(a: AthleteParams, goalSeconds: number, roxzoneOverride?: Measured<number>, calibrationMultiplier = 1): HyroxPrediction {
   const runThreshold = a.runThresholdSecPerKm;
   const sei = a.strengthEnduranceIndex;
   const roxzone = roxzoneOverride ?? seeded(DEFAULT_ROXZONE_SECONDS);
@@ -131,7 +131,7 @@ export function predictHyrox(a: AthleteParams, goalSeconds: number, roxzoneOverr
   };
   const confidence = assessConfidence(inputs);
   const point = goalProbabilityPoint(totalSeconds, goalSeconds);
-  const band = widenForConfidence(5, confidence);
+  const band = widenForConfidence(5, confidence, calibrationMultiplier);
 
   return {
     totalSeconds,

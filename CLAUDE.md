@@ -135,10 +135,42 @@ causes a support conversation.
   Health export, has been exercised here. The Apple Health parser IS fully
   tested, against synthetic export.xml data, since that path needs no
   network at all.
-- **Phase 6** — wire `outcomeLog` into an actual calibration loop: when the
-  app says "high confidence," is it right more often than "low confidence"?
-  If not, the confidence labels are lying and need to be pulled in. This is
-  the mechanism that turns logged data into an actual moat over time.
+- **Phase 6 (done)** — the calibration loop actually closes end-to-end, not
+  just as a report nobody reads. `shared/calibrationReport.ts` (pure, no DB —
+  takes {confidenceRatio, predictedProbability, actualSuccess} records) computes
+  a Brier score, buckets accuracy by mostly-guessed vs. mostly-measured
+  inputs, and — once there are ≥20 resolved "confident" (≥70% or ≤30%)
+  predictions — a `recommendedMultiplier`: >1 if confident calls were right
+  less often than the stated probability implied (overconfident, widen
+  future bands), <1 if more often (underconfident, narrow, floored at 0.5).
+  `server/calibrationService.ts` extracts those records from `outcomeLog`
+  and exposes `recordOutcome(id, {achieved})` / `getCalibrationReport()`.
+  `shared/measured.ts`'s `widenForConfidence` gained an optional
+  `calibrationMultiplier` parameter (default 1, so every existing caller is
+  unaffected); `predictRunRace`/`predictTriathlon`/`predictHyrox` — the
+  three predictors with a `goalProbability` — thread it through, and
+  `routes.ts` passes `getCalibrationMultiplier()` on every call. Every
+  `/api/predict/{run,triathlon,hyrox}` response now includes an `outcomeId`;
+  `POST /api/outcomes/:id/record` and `GET /api/calibration/report` close
+  the loop.
+  **Verified live, not just unit-tested**: seeded 20 systematically
+  overconfident predictions through the real running server (stated ~99%
+  confidence, actually right ~19% of the time) via the real HTTP endpoints,
+  confirmed the report detected it (`recommendedMultiplier: 1.8`), and
+  confirmed the very next `/api/predict/run` call came back with a band
+  widened from 16 points to 23 automatically — no restart, no manual
+  intervention. That said: this is a synthetic proof the *mechanism* works,
+  not evidence the app is well- or mis-calibrated — there is no real usage
+  history yet, and there won't be a genuine signal here until real
+  predictions accumulate real outcomes over months. That accumulation, not
+  this session, is what actually makes it a moat.
+  111 tests, `tsc` clean.
+
+All six phases are done. What's next is real usage: connect a real Garmin/
+Whoop account or import a real Apple Health export (Phase 5's actual first
+test), have the onboarding chat handle a real multi-turn conversation with
+an ANTHROPIC_API_KEY set (Phase 4's actual first test), and start logging
+real outcomes so Phase 6's calibration has something to say.
 
 ## Running it
 
