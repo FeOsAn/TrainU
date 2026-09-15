@@ -82,6 +82,34 @@ export const preferences = sqliteTable("preferences", {
 });
 
 /**
+ * Garmin has no public OAuth2 API for hobbyist third-party apps — both
+ * sibling apps authenticate via the unofficial `garmin-connect` package
+ * (email/password through Garmin's own SSO), and store the resulting
+ * session tokens exactly like this. Plaintext, matching the sibling apps'
+ * own security posture for what's a single-athlete deployment; worth
+ * revisiting before this is ever multi-tenant.
+ */
+export const garminCredentials = sqliteTable("garmin_credentials", {
+  id: text("id").primaryKey(), // "self"
+  email: text("email"),
+  password: text("password"),
+  tokenJson: text("token_json"),
+  tokenExpiresAt: text("token_expires_at"),
+  authError: text("auth_error"),
+  updatedAt: text("updated_at").notNull(),
+});
+
+/** Whoop has real OAuth2 (authorization-code flow) and rotates the refresh token on every use — see server/connectors/whoop.ts for why that matters. */
+export const whoopCredentials = sqliteTable("whoop_credentials", {
+  id: text("id").primaryKey(), // "self"
+  accessToken: text("access_token"),
+  refreshToken: text("refresh_token"),
+  tokenExpiresAt: text("token_expires_at"),
+  authError: text("auth_error"),
+  updatedAt: text("updated_at").notNull(),
+});
+
+/**
  * The outcome-data log: every prediction or plan decision the app makes,
  * paired with what actually happened once it's known. This is the asset the
  * whole "moat" conversation was about — it only compounds if it's written

@@ -9,7 +9,7 @@
     "start": "NODE_ENV=production node dist/index.js",
     "check": "tsc",
     "pretest": "rm -f trainu.test.db trainu.test.db-shm trainu.test.db-wal && DB_PATH=./trainu.test.db npx drizzle-kit push --force",
-    "test": "DB_PATH=./trainu.test.db node --import tsx --test shared/*.test.ts shared/predictors/*.test.ts shared/arbitration/*.test.ts server/*.test.ts",
+    "test": "DB_PATH=./trainu.test.db node --import tsx --test shared/*.test.ts shared/predictors/*.test.ts shared/arbitration/*.test.ts server/*.test.ts server/connectors/*.test.ts",
     "posttest": "rm -f trainu.test.db trainu.test.db-shm trainu.test.db-wal",
     "db:push": "drizzle-kit push"
   },
@@ -21,6 +21,7 @@
     "drizzle-zod": "^0.7.0",
     "express": "^5.0.1",
     "fit-file-parser": "^3.0.2",
+    "garmin-connect": "^1.6.2",
     "multer": "^2.2.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

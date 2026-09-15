@@ -19,8 +19,12 @@ import { arbitratePlan } from "@shared/arbitration/arbitrate";
 import { createGoal, InvalidGoalError, listGoals } from "./goalsService";
 import { chatOnboarding } from "./onboarding";
 import { getPreferences, updateConnectorPreferences, updateFeaturePreferences } from "./preferencesService";
+import { connectGarmin, syncGarmin } from "./connectors/garmin";
+import { exchangeWhoopCode, getWhoopAuthorizationUrl, syncWhoop } from "./connectors/whoop";
+import { importAppleHealthExport } from "./connectors/appleHealth";
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+const uploadLarge = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 const ATHLETE_ROW_ID = "self";
 
@@ -303,5 +307,58 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
 
   app.patch("/api/preferences/features", (req, res) => {
     res.json(updateFeaturePreferences(req.body ?? {}));
+  });
+
+  // ─── Wearable connectors (Phase 5) ──────────────────────────────────────
+  // Not verified against real Garmin/Whoop accounts or a real Apple Health
+  // export in this environment — no credentials, and Whoop/Garmin OAuth need
+  // a real registered redirect URI. See CLAUDE.md.
+  app.get("/api/connectors/whoop/authorize", (_req, res) => {
+    try {
+      res.json({ url: getWhoopAuthorizationUrl(randomUUID()) });
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message ?? "WHOOP_CLIENT_ID/WHOOP_REDIRECT_URI not configured" });
+    }
+  });
+
+  app.get("/api/connectors/whoop/callback", async (req, res) => {
+    const code = typeof req.query.code === "string" ? req.query.code : null;
+    if (!code) return res.status(400).json({ error: "code is required" });
+    try {
+      await exchangeWhoopCode(code);
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(400).json({ error: e?.message ?? "Whoop token exchange failed" });
+    }
+  });
+
+  app.post("/api/connectors/whoop/sync", async (_req, res) => {
+    const existing = db.select().from(trainingSessions).all().map(rowToSession);
+    const result = await syncWhoop(existing, insertSession);
+    res.json(result);
+  });
+
+  app.post("/api/connectors/garmin/connect", async (req, res) => {
+    const { email, password } = req.body as { email?: string; password?: string };
+    if (!email || !password) return res.status(400).json({ error: "email and password are required" });
+    try {
+      await connectGarmin(email, password);
+      res.json({ ok: true });
+    } catch (e: any) {
+      res.status(400).json({ error: e?.message ?? "Garmin login failed" });
+    }
+  });
+
+  app.post("/api/connectors/garmin/sync", async (_req, res) => {
+    const existing = db.select().from(trainingSessions).all().map(rowToSession);
+    const result = await syncGarmin(existing, insertSession);
+    res.json(result);
+  });
+
+  app.post("/api/connectors/apple-health/import", uploadLarge.single("file"), (req, res) => {
+    if (!req.file) return res.status(400).json({ error: "file is required (multipart field name: file)" });
+    const existing = db.select().from(trainingSessions).all().map(rowToSession);
+    const result = importAppleHealthExport(req.file.buffer.toString("utf-8"), existing, insertSession);
+    res.json(result);
   });
 }

@@ -109,7 +109,32 @@ causes a support conversation.
   (`DB_PATH` env var, wired through `drizzle.config.ts` and
   `pretest`/`posttest`) instead of the dev database, so `npm test` is
   reproducible from a clean checkout and never pollutes real dev data.
-- **Phase 5** — Garmin/Whoop/Apple Health connectors.
+- **Phase 5 (done)** — `server/connectors/`: Garmin (email/password via the
+  unofficial `garmin-connect` package — Garmin has no public OAuth2 API for
+  a hobbyist app, same approach both sibling apps use), Whoop (real OAuth2),
+  Apple Health (no server API at all — parses an `export.xml` the athlete
+  uploads by hand). All three normalize into the same `TrainingSession` and
+  go through Phase 2's `findDuplicate` before insert — one dedupe pipeline,
+  not three.
+  Ported the one lesson from sub5-dashboard's `whoopSync.ts` worth carrying
+  over verbatim: Whoop rotates its refresh token on every use, so two
+  concurrent refreshes racing each other can burn the token and force a
+  reconnect (a real production incident there). `refreshWhoopToken()` is
+  single-flighted — tested by mocking concurrent callers and asserting
+  exactly one network call happens.
+  **Found and fixed a second real bug while testing**: `garmin-connect`
+  builds its axios client with no `timeout` configured and exposes no way
+  to set one, so a network hang would leave that request stuck forever
+  (confirmed by reading its `HttpClient.js` — `axios.create()`, no timeout
+  option anywhere). Wrapped every call into it in `withTimeout()`.
+  97 tests, `tsc` clean. **Caveat, confirmed empirically rather than
+  assumed**: this environment's network egress is host-allowlisted and
+  actively blocks `sso.garmin.com`, `api.prod.whoop.com`, etc. (403 "not in
+  allowlist") — so beyond confirming errors fail cleanly and fast rather
+  than hanging, no real Garmin/Whoop login or sync, and no real Apple
+  Health export, has been exercised here. The Apple Health parser IS fully
+  tested, against synthetic export.xml data, since that path needs no
+  network at all.
 - **Phase 6** — wire `outcomeLog` into an actual calibration loop: when the
   app says "high confidence," is it right more often than "low confidence"?
   If not, the confidence labels are lying and need to be pulled in. This is
