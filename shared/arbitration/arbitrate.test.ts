@@ -98,6 +98,41 @@ test("the canonical example: Ironman nine months out + a wedding six weeks out",
   assert.equal(afterWedding.nutritionStance, "maintenance");
 });
 
+test("a goal whose date has passed does not drag a later goal's taper — it takes no part in arbitration", () => {
+  const athlete = { ...DEFAULT_ATHLETE, weightKg: measured(82, "scale") };
+  // The bug this guards: the wedding finished in October at a neutral 1.0x,
+  // but kept being blended in — at priority 1, so weighted heavily — through
+  // the following June's race week, pulling a 0.5x taper up to 0.83x.
+  const race = goal({ id: "race", type: "endurance_race", label: "Ironman", targetDate: "2027-06-13", priority: 2 });
+  const wedding = goal({ id: "wedding", type: "body_composition", label: "Wedding", targetDate: "2026-10-31", priority: 1, targetMetrics: { targetWeightKg: 78 } });
+
+  const raceWeek = arbitrateWeek([race, wedding], "2027-06-08", athlete);
+  const racePhase = raceWeek.goalPhases.find((p) => p.goalId === "race")!;
+
+  assert.equal(racePhase.phaseName, "taper");
+  assert.equal(raceWeek.loadMultiplier, racePhase.loadMultiplier, "race-week load must be the taper itself, untouched by a goal that finished seven months earlier");
+  assert.equal(raceWeek.conflicts.length, 0, "a goal that has already happened cannot conflict with anything");
+});
+
+test("a past goal is still reported in goalPhases so the UI can show it, even though it doesn't arbitrate", () => {
+  const athlete = { ...DEFAULT_ATHLETE, weightKg: measured(82, "scale") };
+  const race = goal({ id: "race", type: "endurance_race", targetDate: "2027-06-13", priority: 2 });
+  const wedding = goal({ id: "wedding", type: "body_composition", targetDate: "2026-10-31", priority: 1, targetMetrics: { targetWeightKg: 78 } });
+
+  const week = arbitrateWeek([race, wedding], "2027-06-08", athlete);
+  const weddingPhase = week.goalPhases.find((p) => p.goalId === "wedding");
+  assert.ok(weddingPhase, "the past goal should still be listed");
+  assert.equal(weddingPhase!.phaseName, "past");
+});
+
+test("when every goal has passed, the week falls back to a neutral instruction rather than an empty blend", () => {
+  const past = goal({ id: "old", type: "endurance_race", targetDate: "2020-01-01" });
+  const week = arbitrateWeek([past], "2026-09-16", DEFAULT_ATHLETE);
+  assert.equal(week.loadMultiplier, 1);
+  assert.equal(week.nutritionStance, "maintenance");
+  assert.equal(week.conflicts.length, 0);
+});
+
 test("arbitratePlan merges the same conflict across contiguous weeks into one window", () => {
   const athlete = { ...DEFAULT_ATHLETE, weightKg: measured(80, "scale") };
   const race = goal({ id: "race", type: "endurance_race", targetDate: "2026-12-01", priority: 2 });

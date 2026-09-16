@@ -37,55 +37,74 @@ function resolutionFor(goalAId: string, goalBId: string, goals: Goal[]): GoalCon
 
 export function arbitrateWeek(goals: Goal[], date: string, athlete: AthleteParams): ArbitratedWeek {
   const active = goals.filter((g) => g.active);
-  const phases = active.map((g) => phaseForGoal(g, date, athlete));
+  // Keep each goal paired with its own phase rather than relying on two
+  // arrays staying index-aligned — filtering below would silently mismatch
+  // priorities to the wrong goal otherwise.
+  const all = active.map((goal) => ({ goal, phase: phaseForGoal(goal, date, athlete) }));
+
+  /*
+   * A goal whose target date has passed is reported (the UI still shows
+   * "past") but takes NO part in arbitration. It used to, and the result was
+   * a real training bug: a body-composition goal that finished in October
+   * still contributed its neutral 1.0x — at priority 1, so heavily weighted —
+   * straight through the following June's race week, pulling a 0.5x taper up
+   * to 0.83x. The athlete would have been told to train through the taper
+   * into their A-race on behalf of a wedding seven months behind them.
+   */
+  const live = all.filter(({ phase }) => phase.phaseName !== "past");
   const conflicts: GoalConflict[] = [];
+  const liveGoals = live.map(({ goal }) => goal);
 
   // ── Nutrition stance: surplus vs. deficit is a direct contradiction ────
-  const surplusPhases = phases.filter((p) => p.nutritionStance === "surplus");
-  const deficitPhases = phases.filter((p) => p.nutritionStance === "deficit");
+  const surplus = live.filter(({ phase }) => phase.nutritionStance === "surplus");
+  const deficit = live.filter(({ phase }) => phase.nutritionStance === "deficit");
   let nutritionStance: NutritionStance = "maintenance";
 
-  if (surplusPhases.length > 0 && deficitPhases.length > 0) {
-    const surplusGoal = active.find((g) => g.id === surplusPhases[0]!.goalId)!;
-    const deficitGoal = active.find((g) => g.id === deficitPhases[0]!.goalId)!;
-    const surplusWins = surplusGoal.priority <= deficitGoal.priority;
+  if (surplus.length > 0 && deficit.length > 0) {
+    const surplusEntry = surplus[0]!;
+    const deficitEntry = deficit[0]!;
+    const surplusWins = surplusEntry.goal.priority <= deficitEntry.goal.priority;
     nutritionStance = surplusWins ? "surplus" : "deficit";
-    const winner = surplusWins ? surplusPhases[0]! : deficitPhases[0]!;
-    const loser = surplusWins ? deficitPhases[0]! : surplusPhases[0]!;
+    const winner = surplusWins ? surplusEntry.phase : deficitEntry.phase;
+    const loser = surplusWins ? deficitEntry.phase : surplusEntry.phase;
     conflicts.push({
-      betweenGoalIds: [surplusGoal.id, deficitGoal.id],
+      betweenGoalIds: [surplusEntry.goal.id, deficitEntry.goal.id],
       window: { from: date, to: date },
       description: `${winner.goalLabel} needs a ${winner.nutritionStance} and outranks ${loser.goalLabel} by priority, so this week runs ${winner.nutritionStance} — ${loser.goalLabel} will progress slower than it would alone.`,
-      resolution: resolutionFor(surplusGoal.id, deficitGoal.id, active),
+      resolution: resolutionFor(surplusEntry.goal.id, deficitEntry.goal.id, liveGoals),
     });
-  } else if (deficitPhases.length > 0) {
+  } else if (deficit.length > 0) {
     nutritionStance = "deficit";
-  } else if (surplusPhases.length > 0) {
+  } else if (surplus.length > 0) {
     nutritionStance = "surplus";
   }
 
   // ── Training load: priority-weighted blend, conflict flagged when the
   // raw asks actually pull apart rather than merely differing a little. ──
   let loadMultiplier = 1.0;
-  if (active.length > 0) {
-    const totalWeight = active.reduce((sum, g) => sum + 1 / g.priority, 0);
-    loadMultiplier = phases.reduce((sum, p, i) => sum + p.loadMultiplier * (1 / active[i]!.priority), 0) / totalWeight;
+  if (live.length > 0) {
+    const totalWeight = live.reduce((sum, { goal }) => sum + 1 / goal.priority, 0);
+    loadMultiplier = live.reduce((sum, { goal, phase }) => sum + phase.loadMultiplier * (1 / goal.priority), 0) / totalWeight;
 
-    const maxPhase = phases.reduce((a, b) => (b.loadMultiplier > a.loadMultiplier ? b : a));
-    const minPhase = phases.reduce((a, b) => (b.loadMultiplier < a.loadMultiplier ? b : a));
-    if (maxPhase.goalId !== minPhase.goalId && maxPhase.loadMultiplier - minPhase.loadMultiplier > LOAD_CONFLICT_THRESHOLD) {
-      const highGoal = active.find((g) => g.id === maxPhase.goalId)!;
-      const lowGoal = active.find((g) => g.id === minPhase.goalId)!;
+    const high = live.reduce((a, b) => (b.phase.loadMultiplier > a.phase.loadMultiplier ? b : a));
+    const low = live.reduce((a, b) => (b.phase.loadMultiplier < a.phase.loadMultiplier ? b : a));
+    if (high.goal.id !== low.goal.id && high.phase.loadMultiplier - low.phase.loadMultiplier > LOAD_CONFLICT_THRESHOLD) {
       conflicts.push({
-        betweenGoalIds: [highGoal.id, lowGoal.id],
+        betweenGoalIds: [high.goal.id, low.goal.id],
         window: { from: date, to: date },
-        description: `${maxPhase.goalLabel} wants elevated load (${maxPhase.phaseName}, ${maxPhase.loadMultiplier}x) while ${minPhase.goalLabel} wants it reduced (${minPhase.phaseName}, ${minPhase.loadMultiplier}x). Blended to ${Math.round(loadMultiplier * 100) / 100}x — neither goal is fully honored this week.`,
-        resolution: resolutionFor(highGoal.id, lowGoal.id, active),
+        description: `${high.phase.goalLabel} wants elevated load (${high.phase.phaseName}, ${high.phase.loadMultiplier}x) while ${low.phase.goalLabel} wants it reduced (${low.phase.phaseName}, ${low.phase.loadMultiplier}x). Blended to ${Math.round(loadMultiplier * 100) / 100}x — neither goal is fully honored this week.`,
+        resolution: resolutionFor(high.goal.id, low.goal.id, liveGoals),
       });
     }
   }
 
-  return { date, goalPhases: phases, nutritionStance, loadMultiplier: Math.round(loadMultiplier * 100) / 100, conflicts };
+  return {
+    date,
+    goalPhases: all.map(({ phase }) => phase),
+    nutritionStance,
+    loadMultiplier: Math.round(loadMultiplier * 100) / 100,
+    conflicts,
+  };
 }
 
 export interface ArbitratedPlan {

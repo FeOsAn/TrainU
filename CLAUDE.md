@@ -83,6 +83,18 @@ causes a support conversation.
   `Goal` gained a `targetMetrics` field (structured numbers — target weight,
   body-fat %, lift id) since `successCriteria` is free text and the
   predictors/arbitration need real numbers to compute against.
+  **Bug found later, when the UI first made it visible** (see "Client"
+  below): a goal whose target date had passed was still taking part in
+  arbitration. Its neutral 1.0x kept getting blended in — at priority 1, so
+  weighted heavily — so a wedding that finished in October pulled the
+  following June's race-week taper from 0.5x up to 0.83x, and manufactured a
+  phantom "conflict" with a goal that no longer existed. The app would have
+  under-tapered an athlete into their A-race on behalf of a dead goal. Past
+  goals are now excluded from the nutrition stance, the load blend and
+  conflict detection, while still being reported in `goalPhases` so the UI
+  can show them. Three regression tests cover it. The Phase 3 tests missed
+  this originally because they checked that a past goal reports `past` and
+  reverts nutrition — never that it stops influencing *load*.
 - **Phase 4 (done)** — `server/onboarding.ts`: a tool-calling chat (Claude
   Sonnet 5, `@anthropic-ai/sdk`) that asks clarifying questions one or two
   at a time and calls `create_goal` once it has enough — copying the two
@@ -166,11 +178,48 @@ causes a support conversation.
   this session, is what actually makes it a moat.
   111 tests, `tsc` clean.
 
-All six phases are done. What's next is real usage: connect a real Garmin/
-Whoop account or import a real Apple Health export (Phase 5's actual first
-test), have the onboarding chat handle a real multi-turn conversation with
-an ANTHROPIC_API_KEY set (Phase 4's actual first test), and start logging
-real outcomes so Phase 6's calibration has something to say.
+## Client
+
+Everything above was API-only until the client was built — five routes under
+`client/src/pages/`, wired with wouter + react-query against `client/src/lib/api.ts`
+(same-origin, since the Express server serves the Vite middleware):
+
+- **Plan** (`/`) — the hero, because the arbitration engine is the product.
+  This week's nutrition stance and blended load multiplier, what each goal
+  wants in isolation, the tradeoffs being made where goals genuinely pull
+  apart, then the weeks ahead.
+- **Athlete** (`/athlete`) — every `Measured<T>` with a seed/measured pill and
+  its provenance string underneath, plus a live count of how many numbers are
+  still guesses. This is the one hard rule made visible to the athlete rather
+  than only enforced in code — the CdA field that started this whole project
+  now literally reads "seed — relaxed road position assumed, not measured".
+- **Goals** (`/goals`), **Coach** (`/coach`, the onboarding chat),
+  **Data** (`/data` — training load, connectors, calibration, sessions).
+
+Styling is hand-rolled CSS adapting sub5-dashboard's `docs/design-system.md`
+tokens (flat panels on hairline borders, one accent, display numerals for
+metrics), with system fonts rather than Google Fonts — this app has to render
+correctly with no outbound network at all, which is exactly the situation in
+the sandbox it was built in.
+
+**Verified in a real browser, not just compiled**: Chromium via Playwright
+(installed with `--no-save`, so it is deliberately not a project dependency)
+across all five routes — zero console errors, zero page errors, zero failed
+API calls; then driven interactively to create a goal through the form, confirm
+validation blocks an incomplete one, edit an athlete number and watch it flip
+seed → measured with the seed counter decrementing, confirm the new goal flows
+through into the arbitrated plan, and confirm the chat degrades gracefully
+without an API key. That interactive pass is what surfaced the past-goal
+arbitration bug noted in Phase 3 — it was invisible until a real plan was
+rendered on screen.
+
+## What's next
+
+Real usage, which needs things this environment can't provide: connect a real
+Garmin/Whoop account or import a real Apple Health export (Phase 5's actual
+first test), have the onboarding chat handle a real multi-turn conversation
+with an `ANTHROPIC_API_KEY` set (Phase 4's actual first test), and start
+logging real outcomes so Phase 6's calibration has something to say.
 
 ## Running it
 
