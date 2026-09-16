@@ -11,6 +11,8 @@ export const appIdentity = sqliteTable("app_identity", {
 export const goals = sqliteTable("goals", {
   id: text("id").primaryKey(),
   type: text("type").notNull(),
+  /** Discipline — see shared/goal.ts. Defaults per type for rows written before it existed. */
+  discipline: text("discipline").notNull().default("other"),
   label: text("label").notNull(),
   targetDate: text("target_date").notNull(),
   priority: integer("priority").notNull(),
@@ -155,4 +157,22 @@ export const outcomeLog = sqliteTable("outcome_log", {
   /** Filled in once the real outcome is known — null until then. */
   actualJson: text("actual_json"),
   observedAt: text("observed_at"),
+});
+
+/**
+ * Capabilities an athlete's goals asked for that the block library couldn't
+ * serve. This is the build queue, written by real goals rather than guessed
+ * at — the same idea as outcomeLog, one level up: outcomeLog records where a
+ * prediction was wrong, this records where the app was simply absent.
+ */
+export const capabilityGaps = sqliteTable("capability_gaps", {
+  capability: text("capability").primaryKey(),
+  /** Goal labels (or the stated-preference marker) that wanted it, JSON array. */
+  wantedByJson: text("wanted_by_json").notNull().default("[]"),
+  /** The declared-but-unbuilt block covering it, when there is one. */
+  plannedBlockId: text("planned_block_id"),
+  firstSeenAt: text("first_seen_at").notNull(),
+  lastSeenAt: text("last_seen_at").notNull(),
+  /** How many times assembly has hit this gap — a proxy for how much it matters. */
+  seenCount: integer("seen_count").notNull().default(1),
 });

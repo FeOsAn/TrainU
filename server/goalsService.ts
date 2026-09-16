@@ -6,7 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { db } from "./db";
 import { goals } from "@shared/schema";
-import type { Goal } from "@shared/goal";
+import { type Discipline, type Goal, defaultDiscipline } from "@shared/goal";
 import { type CreateGoalInput, InvalidGoalError, validateGoalInput } from "./goalValidation";
 
 export type { CreateGoalInput };
@@ -16,6 +16,10 @@ export function rowToGoal(row: typeof goals.$inferSelect): Goal {
   return {
     id: row.id,
     type: row.type as Goal["type"],
+    // Rows written before `discipline` existed store the column default
+    // ("other"), which is wrong for an endurance race — fall back to the
+    // type's own default so an old marathon row still reads as a run.
+    discipline: (row.discipline as Discipline) || defaultDiscipline(row.type as Goal["type"]),
     label: row.label,
     targetDate: row.targetDate,
     priority: row.priority,
@@ -37,6 +41,7 @@ export function createGoal(input: CreateGoalInput): Goal {
   const goal: Goal = {
     id: randomUUID(),
     type: input.type,
+    discipline: input.discipline ?? defaultDiscipline(input.type),
     label: input.label,
     targetDate: input.targetDate,
     priority: input.priority ?? 1,
@@ -50,6 +55,7 @@ export function createGoal(input: CreateGoalInput): Goal {
     .values({
       id: goal.id,
       type: goal.type,
+      discipline: goal.discipline,
       label: goal.label,
       targetDate: goal.targetDate,
       priority: goal.priority,

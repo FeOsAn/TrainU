@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { api, daysUntil, type CompletionStatus, type PlanDay } from "../lib/api";
+import { useAppShell } from "../lib/appShell";
 import type { GoalConflict } from "@shared/goal";
 
 const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -103,6 +104,7 @@ function DayCard({ day, onTick, pending }: { day: PlanDay; onTick: (date: string
 }
 
 export default function Plan() {
+  const { data: shell } = useAppShell();
   const queryClient = useQueryClient();
   const { data: goals } = useQuery({ queryKey: ["goals"], queryFn: api.goals });
   const { data: week, isLoading, error } = useQuery({ queryKey: ["week"], queryFn: () => api.week() });
@@ -220,6 +222,27 @@ export default function Plan() {
           </p>
           {plan.conflicts.map((conflict, i) => (
             <ConflictCard key={i} conflict={conflict} />
+          ))}
+        </div>
+      )}
+
+      {shell && shell.gaps.length > 0 && (
+        <div className="panel">
+          <h2>Not built yet</h2>
+          <p className="small muted" style={{ marginTop: -6 }}>
+            Your goals ask for these and the app can't do them yet. Saying so beats quietly leaving them
+            out — and it's how we decide what to build next.
+          </p>
+          {shell.gaps.map((gap) => (
+            <div key={gap.capability} className="surface-2" style={{ marginBottom: 8 }}>
+              <div className="row">
+                <strong>{gap.label}</strong>
+                <span className="pill pill-seed">not built</span>
+              </div>
+              <div className="tiny muted" style={{ marginTop: 6, lineHeight: 1.45 }}>
+                {gap.note ?? `Wanted by ${gap.wantedBy.join(" and ")}.`}
+              </div>
+            </div>
           ))}
         </div>
       )}

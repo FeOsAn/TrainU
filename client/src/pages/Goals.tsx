@@ -1,9 +1,24 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, daysUntil, GOAL_TYPE_LABELS } from "../lib/api";
-import type { GoalType } from "@shared/goal";
+import { type Discipline, type GoalType, defaultDiscipline } from "@shared/goal";
 
 const TYPES = Object.keys(GOAL_TYPE_LABELS) as GoalType[];
+
+/*
+ * Only endurance races are ambiguous about which sports they involve, and the
+ * answer changes the plan completely — a triathlon discipline is what makes
+ * the prescriber schedule rides and swims instead of handing an Ironman
+ * athlete a marathon week. Every other goal type implies its own sports, so
+ * asking would be a question with one answer.
+ */
+const DISCIPLINE_LABELS: Partial<Record<Discipline, string>> = {
+  run: "Running only",
+  triathlon: "Triathlon (swim / bike / run)",
+  cycling: "Cycling",
+  swimming: "Swimming",
+};
+const DISCIPLINE_CHOICES = Object.keys(DISCIPLINE_LABELS) as Discipline[];
 
 /** Only the target fields that actually mean something for the chosen goal type. */
 function metricFieldsFor(type: GoalType): Array<{ key: string; label: string; placeholder: string }> {
@@ -29,6 +44,7 @@ export default function Goals() {
   const { data: goals, isLoading } = useQuery({ queryKey: ["goals"], queryFn: api.goals });
 
   const [type, setType] = useState<GoalType>("endurance_race");
+  const [discipline, setDiscipline] = useState<Discipline>("run");
   const [label, setLabel] = useState("");
   const [targetDate, setTargetDate] = useState("");
   const [priority, setPriority] = useState(1);
@@ -42,7 +58,7 @@ export default function Goals() {
         const n = parseFloat(raw);
         if (Number.isFinite(n)) targetMetrics[key] = n;
       }
-      return api.createGoal({ type, label, targetDate, priority, successCriteria, targetMetrics });
+      return api.createGoal({ type, discipline: type === "endurance_race" ? discipline : defaultDiscipline(type), label, targetDate, priority, successCriteria, targetMetrics });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["goals"] });
@@ -109,6 +125,22 @@ export default function Goals() {
             ))}
           </select>
         </label>
+
+        {type === "endurance_race" && (
+          <label>
+            <span className="section-label">Which sports</span>
+            <select value={discipline} onChange={(e) => setDiscipline(e.target.value as Discipline)}>
+              {DISCIPLINE_CHOICES.map((d) => (
+                <option key={d} value={d}>
+                  {DISCIPLINE_LABELS[d]}
+                </option>
+              ))}
+            </select>
+            <span className="tiny muted" style={{ display: "block", marginTop: 5, lineHeight: 1.45 }}>
+              This decides the week you get. A triathlon is planned around the bike; a running race isn't.
+            </span>
+          </label>
+        )}
 
         <label>
           <span className="section-label">Name</span>

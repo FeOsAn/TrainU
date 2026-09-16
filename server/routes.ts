@@ -26,6 +26,7 @@ import { getPreferences, updateConnectorPreferences, updateFeaturePreferences } 
 import { connectGarmin, syncGarmin } from "./connectors/garmin";
 import { exchangeWhoopCode, getWhoopAuthorizationUrl, syncWhoop } from "./connectors/whoop";
 import { importAppleHealthExport } from "./connectors/appleHealth";
+import { getAppShell, listGapQueue, recordGaps } from "./appShellService";
 import { getCalibrationMultiplier, getCalibrationReport, OutcomeNotFoundError, recordOutcome } from "./calibrationService";
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -296,6 +297,27 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
   // One call, because this is the screen an athlete opens every morning:
   // the arbitrated week, the sessions it resolves to, each day's macro
   // targets, and which sessions have already been ticked off.
+  /*
+   * The assembled app: which surfaces and blocks this athlete gets, what the
+   * app can do for them, and — the part that matters — what their goals asked
+   * for that isn't built. The client renders off this rather than off a
+   * hardcoded nav, so an athlete's goals decide their app.
+   */
+  app.get("/api/app-shell", (req, res) => {
+    const requested = typeof req.query.date === "string" ? req.query.date : new Date().toISOString().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(requested) || Number.isNaN(Date.parse(`${requested}T00:00:00Z`))) {
+      return res.status(400).json({ error: "date must be YYYY-MM-DD" });
+    }
+    const app_ = getAppShell(requested);
+    recordGaps(app_);
+    res.json(app_);
+  });
+
+  /** The build queue, accumulated across every assembly. Ours to read, not the athlete's. */
+  app.get("/api/app-shell/gaps", (_req, res) => {
+    res.json({ gaps: listGapQueue() });
+  });
+
   app.get("/api/plan/week", (req, res) => {
     const requested = typeof req.query.date === "string" ? req.query.date : new Date().toISOString().slice(0, 10);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(requested) || Number.isNaN(Date.parse(`${requested}T00:00:00Z`))) {

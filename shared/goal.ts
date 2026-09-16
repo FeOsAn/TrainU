@@ -8,6 +8,24 @@
 
 export type GoalType = "endurance_race" | "hyrox" | "body_composition" | "strength" | "general_fitness";
 
+/**
+ * Which sports a goal actually involves. `endurance_race` covers both a
+ * marathon and an Ironman, and until this existed the app could not tell them
+ * apart — so every endurance goal got a run-only week, and an Ironman athlete
+ * was prescribed a marathon plan. The swim and bike sessions were fully built
+ * in the prescriber the whole time; nothing could ask for them.
+ *
+ * Only meaningful for `endurance_race`; every other goal type is "other".
+ */
+export type Discipline = "run" | "triathlon" | "cycling" | "swimming" | "other";
+
+export const DISCIPLINES: Discipline[] = ["run", "triathlon", "cycling", "swimming", "other"];
+
+/** What a goal of this type defaults to when the athlete hasn't said. */
+export function defaultDiscipline(type: GoalType): Discipline {
+  return type === "endurance_race" ? "run" : "other";
+}
+
 export interface GoalConstraint {
   /** Plain language, shown back to the athlete as-is. "No running the last 10 days before the wedding." */
   label: string;
@@ -33,6 +51,8 @@ export interface GoalTargetMetrics {
 export interface Goal {
   id: string;
   type: GoalType;
+  /** Which sports this goal involves — see Discipline. Defaults per type. */
+  discipline: Discipline;
   /** "Berlin Marathon", "Cousin's wedding" — whatever the athlete calls it. */
   label: string;
   targetDate: string;

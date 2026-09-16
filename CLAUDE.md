@@ -11,6 +11,15 @@ either ignoring the conflict or silently picking one, and it gets measurably
 better over time because every prediction and plan decision is logged
 against what actually happened.
 
+The athlete does get their own app, assembled from a library of building
+blocks off their goal model — see Phase 8. Assembled, not generated: a model
+writing bespoke UI per user produces code nobody reviewed, can't test, and
+can't hold to the one hard rule below. A curated library plus a deterministic
+assembler is the same promise from the athlete's side and an asset on ours.
+When an athlete's goals reach past the library, the assembler says so and
+logs it, and we build the block — so the backlog is written by real goals
+rather than guessed at.
+
 Two sibling apps already exist and are the reference material for this one:
 `FeOsAn/sub5-dashboard` (triathlon, sub-5 Ironman) and `FeOsAn/HyroxNga`
 (HYROX doubles). Both are read-only from this session — nothing gets copied
@@ -258,6 +267,96 @@ causes a support conversation.
   long-run day) and the shared-session note "Serves Wedding and Ironman 70.3
   at once — one session, both goals" — zero console, page or HTTP errors.
 
+- **Phase 8 (done)** — the app is now ASSEMBLED per athlete rather than being
+  one fixed shell for everyone. The distinction that matters: TrainU does not
+  *generate* an app (an LLM writing bespoke UI per user can't be reviewed,
+  tested, or held to the `Measured<T>` rule, because nobody wrote it). It
+  assembles one from a curated block library, deterministically, off the goal
+  model. Same promise from the athlete's side — "I told it my goals and the
+  app is about my goals" — on code that was validated once and reused.
+  - `shared/appShell/blocks.ts` is the catalog. Every block declares what
+    capabilities it PROVIDES and who it applies to (goal types, disciplines,
+    stated preferences); every goal type declares what it NEEDS. Engine blocks
+    (`surface: "engine"`) provide without rendering, so "the prescriber can do
+    X for this athlete" and "this panel shows for this athlete" resolve
+    through ONE matching rule rather than two that drift — the same mistake
+    `SESSION_KINDS` exists to prevent a layer down.
+  - `shared/appShell/assemble.ts` is the assembler: pure, no DB, no model
+    call. Goals + preferences → which surfaces exist, which blocks sit on
+    each, what the app can do, and **what it can't**.
+  - **The gap loop is the point.** A capability a live goal needs that no
+    built block provides is reported to the athlete ("Not built yet", naming
+    which goal wanted it) and logged to `capabilityGaps` via
+    `server/appShellService.ts`. So the build queue gets written by real
+    athlete goals instead of guessed at — the same loop Phase 6 runs for
+    predictions, one level up: `outcomeLog` records where a prediction was
+    wrong, `capabilityGaps` records where the app was simply absent.
+    `GET /api/app-shell` and `GET /api/app-shell/gaps`.
+
+  **The gap mechanism found a real bug before it was even finished.** `Goal`
+  had no way to say which sports it involved, so `endurance_race` covered a
+  marathon and an Ironman identically and every endurance goal took the
+  run-only quality list. Meanwhile `prescribe.ts` contained *complete* swim
+  and bike sessions — targets off CSS and FTP, TSS weights, duration bounds,
+  rationale strings — that nothing could ever request. **An Ironman athlete
+  was being handed a marathon plan**, with the correct sessions sitting built
+  and unreachable in the same file. Fixed by adding `Discipline` to `Goal`
+  (run / triathlon / cycling / swimming / other) and a discipline-aware
+  `qualitiesFor()`; a regression test now asserts a triathlon week contains a
+  ride and a swim. Generalized into a catalog-integrity test: any *targeted*
+  block providing a capability no goal type it serves ever asks for is
+  unreachable, and fails the suite.
+
+  Three further findings from inspecting generated weeks rather than trusting
+  green tests:
+  1. **The week's anchor was hardcoded to `run_long`.** Once triathlon weeks
+     existed, that rule actively fought the fix — pushing the long run back
+     above the ride it was meant to sit beneath. Split into two rules: the
+     long run outlasts every other RUN, and the discipline's `ANCHOR_KIND`
+     outlasts everything. For a runner both resolve to the long run, so the
+     marathon week is byte-identical to before.
+  2. **`KIND_WEIGHT` was tuned for a runner**, where a ride is cross-training.
+     In a triathlon the same `bike_endurance` session is the main event. A
+     70.3 week came out 49% running / 41% bike by minutes against a race
+     that's roughly 55% bike. `DISCIPLINE_KIND_WEIGHT` overrides per
+     discipline (triathlon now lands 57/33/10) while leaving every other goal
+     type on exactly the weights it had.
+  3. **`athlete.stations` claimed to be built and rendered nothing.**
+     `AthleteParams.benchmarks` holds HYROX station times and
+     `calibrateBenchmark()` can write them, but no screen enters them — so a
+     HYROX athlete was silently short-changed. Re-declared `planned`, which
+     makes it an honest gap instead. The catalog is only worth something if
+     "built" means built.
+
+  Also fixed: onboarding has asked every athlete about physique tracking since
+  Phase 4 and written the answer to `preferences.features.physiqueTracking` —
+  which **nothing has ever read**. It's now a declared-but-unbuilt block, so
+  the athlete is told it isn't built rather than the preference vanishing.
+  A stated preference is a stated need; storing it silently was the one
+  option that wasn't acceptable.
+
+  Client: the Athlete page's field groups ARE blocks and render in assembled
+  order, and the seed counter now counts only VISIBLE fields (telling a
+  marathoner 18 numbers are seeds when 3 are bike/swim fields they'll never
+  see sends them hunting for measurements nothing will ask for). The Goals
+  form gained a "Which sports" selector, shown only for endurance races where
+  it changes anything. The Plan page ends with "Not built yet".
+
+  175 tests, `tsc` clean. **Verified live in a browser**: the same athlete
+  with a triathlon goal sees `RUNNING / BIKE & SWIM / HEART RATE / STRENGTH /
+  BODY`, 18 seeds, and a week containing a 109-minute ride and a swim; flipped
+  to a running race, the app reshapes to `RUNNING / HEART RATE / STRENGTH /
+  BODY`, 15 seeds, and no ride or swim — zero console, page or HTTP errors.
+  Edge cases: bad dates 400, a hallucinated discipline rejected 400, an empty
+  discipline on an old row falling back to its type's default, and an athlete
+  with no live goals degrading to the universal blocks plus an honest gap.
+
+  **Known limitation, not a bug**: durations are per-KIND, so two rides in one
+  week come out the same length. A real triathlon week has one long weekend
+  ride and a shorter midweek one. Fixing it means per-occurrence sizing, which
+  would also change every multi-easy-run week — worth doing deliberately, not
+  as a side effect of this phase.
+
 ## Client
 
 Everything above was API-only until the client was built — five routes under
@@ -304,6 +403,13 @@ Garmin/Whoop account or import a real Apple Health export (Phase 5's actual
 first test), have the onboarding chat handle a real multi-turn conversation
 with an `ANTHROPIC_API_KEY` set (Phase 4's actual first test), and start
 logging real outcomes so Phase 6's calibration has something to say.
+
+The block library is the other thing that compounds: every gap
+`capabilityGaps` records is a block that, once built, serves every future
+athlete whose goals ask for it. Two are already queued and named — a
+race-day pacing plan and physique tracking — plus HYROX station-benchmark
+entry. Per-occurrence session sizing (one long ride and one shorter one,
+rather than two identical) is the known limitation worth closing deliberately.
 
 Phase 7 makes that last one materially easier: adherence rows arrive weekly
 rather than a few times a year, and they carry both what was prescribed and

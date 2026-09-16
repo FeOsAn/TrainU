@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, formatPace } from "../lib/api";
+import { orderByBlocks, useSurfaceBlocks } from "../lib/appShell";
 import type { AthleteParams } from "@shared/athlete";
 
 type ScalarKey = Exclude<keyof AthleteParams, "benchmarks">;
@@ -11,8 +12,15 @@ interface FieldSpec {
   format?: (n: number) => string;
 }
 
-const GROUPS: Array<{ title: string; fields: FieldSpec[] }> = [
+/*
+ * Each group is a BLOCK — see shared/appShell/blocks.ts. The assembler
+ * decides which of these an athlete sees, so a body-composition athlete isn't
+ * asked to care about CdA and critical swim speed, and a marathoner isn't
+ * either. The ids here have to match the catalog's.
+ */
+const GROUPS: Array<{ blockId: string; title: string; fields: FieldSpec[] }> = [
   {
+    blockId: "athlete.running",
     title: "Running",
     fields: [
       { key: "runThresholdSecPerKm", label: "Fresh kilometre", format: formatPace },
@@ -22,6 +30,7 @@ const GROUPS: Array<{ title: string; fields: FieldSpec[] }> = [
     ],
   },
   {
+    blockId: "athlete.bikeSwim",
     title: "Bike & swim",
     fields: [
       { key: "ftpWatts", label: "FTP", format: (n) => `${n} W` },
@@ -30,6 +39,7 @@ const GROUPS: Array<{ title: string; fields: FieldSpec[] }> = [
     ],
   },
   {
+    blockId: "athlete.heartRate",
     title: "Heart rate",
     fields: [
       { key: "lthrBpm", label: "Threshold HR", format: (n) => `${n} bpm` },
@@ -37,6 +47,7 @@ const GROUPS: Array<{ title: string; fields: FieldSpec[] }> = [
     ],
   },
   {
+    blockId: "athlete.body",
     title: "Body",
     fields: [
       { key: "weightKg", label: "Weight", format: (n) => `${n} kg` },
@@ -46,6 +57,7 @@ const GROUPS: Array<{ title: string; fields: FieldSpec[] }> = [
     ],
   },
   {
+    blockId: "athlete.strength",
     title: "Strength",
     fields: [
       { key: "squat1RmKg", label: "Squat 1RM", format: (n) => `${n} kg` },
@@ -126,12 +138,15 @@ export default function Athlete() {
     },
   });
 
-  // `benchmarks` is a Record, not a Measured<T> — it has no `.verified`, so it
-  // has to be filtered out at runtime, not just narrowed away in the type.
+  const blocks = useSurfaceBlocks("athlete");
+  const groups = orderByBlocks(GROUPS, blocks);
+
+  // Counted over the VISIBLE fields only. Telling a marathoner that 14 of
+  // their numbers are seeds, when 5 of those are bike and swim fields this
+  // app has decided not to show them, sends them looking for measurements
+  // nothing is going to ask for.
   const seedCount = athlete
-    ? (Object.keys(athlete) as Array<keyof AthleteParams>)
-        .filter((key): key is ScalarKey => key !== "benchmarks")
-        .filter((key) => !athlete[key].verified).length
+    ? groups.flatMap((group) => group.fields).filter((spec) => !athlete[spec.key].verified).length
     : 0;
 
   return (
@@ -159,8 +174,8 @@ export default function Athlete() {
       )}
 
       {athlete &&
-        GROUPS.map((group) => (
-          <div key={group.title} className="panel">
+        groups.map((group) => (
+          <div key={group.blockId} className="panel">
             <div className="section-label" style={{ marginBottom: 10 }}>
               {group.title}
             </div>

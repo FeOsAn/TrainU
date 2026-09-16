@@ -9,7 +9,7 @@
  * sessions, never to invent the periodization.
  */
 
-import type { GoalType } from "../goal";
+import { type Discipline, type GoalType, defaultDiscipline } from "../goal";
 import type { SessionKind } from "./sessionKinds";
 
 /**
@@ -42,6 +42,86 @@ export const GOAL_QUALITIES: Record<GoalType, SessionKind[]> = {
 
   general_fitness: ["run_easy", "strength_lower", "run_easy", "strength_push"],
 };
+
+/**
+ * Discipline overrides, for goal types where the sport isn't implied by the
+ * type alone. `endurance_race` covers a marathon and an Ironman equally, and
+ * before this existed every endurance goal took the run-only list above — so
+ * an Ironman athlete was prescribed a marathon plan, with the swim and bike
+ * sessions sitting fully implemented in prescribe.ts and unreachable because
+ * nothing could ask for them.
+ *
+ * Same ordering rule as GOAL_QUALITIES: most important first, drops from the
+ * right. For long-course triathlon the bike leads, because it's both the
+ * largest time block in the race and the one where a weak engine costs the
+ * most — you run the marathon on whatever the bike left you.
+ */
+export const DISCIPLINE_QUALITIES: Partial<Record<Discipline, SessionKind[]>> = {
+  triathlon: [
+    "bike_endurance",
+    "run_long",
+    "swim_technique",
+    "run_easy",
+    "bike_endurance",
+    "run_threshold",
+    "swim_technique",
+    "strength_lower",
+  ],
+  cycling: ["bike_endurance", "bike_endurance", "run_easy", "bike_endurance", "strength_lower"],
+  swimming: ["swim_technique", "swim_technique", "swim_technique", "strength_pull", "run_easy"],
+};
+
+/**
+ * What this goal actually wants trained. The single lookup both the
+ * prescriber and its tests go through, so a discipline can never be honoured
+ * in one place and ignored in another.
+ */
+export function qualitiesFor(type: GoalType, discipline?: Discipline): SessionKind[] {
+  const resolved = discipline ?? defaultDiscipline(type);
+  return DISCIPLINE_QUALITIES[resolved] ?? GOAL_QUALITIES[type];
+}
+
+
+/**
+ * The week's ANCHOR — the session that must come out biggest.
+ *
+ * For a runner that's the long run, and hardcoding it was right until the
+ * app could tell a marathon from an Ironman. For a triathlete it's the long
+ * ride: the bike is both the largest block of the race and the thing that
+ * decides what's left for the run. Leaving the anchor as the long run gave a
+ * 70.3 athlete a week that was 49% running by minutes against a race that's
+ * roughly 55% bike.
+ */
+export const ANCHOR_KIND: Partial<Record<Discipline, SessionKind>> = {
+  run: "run_long",
+  triathlon: "bike_endurance",
+  cycling: "bike_endurance",
+  swimming: "swim_technique",
+  other: "run_long",
+};
+
+/**
+ * Per-discipline overrides on KIND_WEIGHT, applied over the global table.
+ *
+ * KIND_WEIGHT's global values are tuned for a runner, where a ride is
+ * cross-training. In a triathlon the same `bike_endurance` session is the
+ * main event, so it can't share one number with the recovery spin a
+ * marathoner does. Overriding rather than replacing keeps every other goal
+ * type on exactly the weights it already had.
+ */
+export const DISCIPLINE_KIND_WEIGHT: Partial<Record<Discipline, Partial<Record<SessionKind, number>>>> = {
+  // Time split targeted at roughly 55% bike / 30% run / 15% swim, which is
+  // about where a long-course race actually lands.
+  triathlon: { bike_endurance: 3, swim_technique: 1.1, run_long: 1.5, run_easy: 0.8, run_threshold: 0.8 },
+  cycling: { bike_endurance: 3, run_easy: 0.6 },
+  swimming: { swim_technique: 2.2, run_easy: 0.6 },
+};
+
+/** The weight this kind carries for this discipline. One lookup, so an override can't be honoured in one place and missed in another. */
+export function kindWeight(kind: SessionKind, discipline?: Discipline): number {
+  const resolved = discipline ?? "other";
+  return DISCIPLINE_KIND_WEIGHT[resolved]?.[kind] ?? KIND_WEIGHT[kind];
+}
 
 export type IntensityCeiling = "easy" | "threshold" | "full";
 

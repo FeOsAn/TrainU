@@ -12,6 +12,7 @@ function goal(over: Partial<Goal>): Goal {
   return {
     id: "g",
     type: "endurance_race",
+    discipline: "run",
     label: "Goal",
     targetDate: "2027-06-01",
     priority: 1,
@@ -176,4 +177,51 @@ test("a past goal contributes no sessions", () => {
   const live = goal({ id: "live", targetDate: "2027-06-01" });
   const w = prescribe([past, live]);
   assert.ok(w.sessions.every((s) => !s.servesGoalIds.includes("old")), "a goal that already happened shouldn't be prescribed for");
+});
+
+
+// ─── Discipline ──────────────────────────────────────────────────────────────
+
+test("a triathlon goal is prescribed swim and bike sessions, not a marathon plan", () => {
+  // The gap the app-shell assembler surfaced: `endurance_race` covered both a
+  // marathon and an Ironman, so every endurance goal took the run-only
+  // quality list — while prescribe.ts had complete swim and bike sessions
+  // (targets, TSS weights, duration bounds, rationale) that nothing could ask
+  // for. An Ironman athlete was handed a marathon plan.
+  const w = prescribe([goal({ discipline: "triathlon", label: "Ironman 70.3" })], DEFAULT_ATHLETE, 6);
+  const sports = new Set(w.sessions.map((s) => s.sport));
+  assert.ok(sports.has("bike"), `a triathlon week must contain a ride, got: ${[...sports].join(", ")}`);
+  assert.ok(sports.has("swim"), `a triathlon week must contain a swim, got: ${[...sports].join(", ")}`);
+  assert.ok(sports.has("run"), "and still run");
+});
+
+test("a run-discipline endurance goal is unchanged by the discipline field", () => {
+  const w = prescribe([goal({ discipline: "run" })], DEFAULT_ATHLETE, 5);
+  const sports = new Set(w.sessions.map((s) => s.sport));
+  assert.ok(!sports.has("bike") && !sports.has("swim"), "a marathoner gets no swim/bike — this is the behaviour that was always correct");
+});
+
+test("the triathlon week's sessions carry real swim and bike targets", () => {
+  const athlete = { ...DEFAULT_ATHLETE, ftpWatts: measured(290, "20 min test"), cssSecPer100m: measured(105, "400 m TT") };
+  const w = prescribe([goal({ discipline: "triathlon" })], athlete, 6);
+  const ride = w.sessions.find((s) => s.sport === "bike");
+  const swim = w.sessions.find((s) => s.sport === "swim");
+  assert.ok(ride && ride.targets.length > 0, "a prescribed ride with no numbers is the coefficient problem again");
+  assert.ok(swim && swim.targets.length > 0);
+  assert.ok(ride.targets.some((t) => /\d+\s*W/.test(t)), `the ride should carry watts off FTP, got: ${ride.targets.join(" | ")}`);
+});
+
+test("a triathlon goal and a body-composition goal still merge into one week", () => {
+  const w = prescribe(
+    [
+      goal({ id: "tri", discipline: "triathlon", label: "Ironman 70.3", priority: 1 }),
+      goal({ id: "wed", type: "body_composition", discipline: "other", label: "Wedding", targetDate: "2026-11-01", priority: 2 }),
+    ],
+    DEFAULT_ATHLETE,
+    6,
+  );
+  assert.ok(w.sessions.length > 0);
+  assert.ok(w.sessions.length <= 6, `six days must not produce ${w.sessions.length} sessions`);
+  const sports = new Set(w.sessions.map((s) => s.sport));
+  assert.ok(sports.has("bike") || sports.has("swim"), "the triathlon is the priority-1 goal; it must survive arbitration with a second goal");
 });

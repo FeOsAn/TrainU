@@ -16,11 +16,11 @@
  */
 
 import { FRESH_KM_TO_INTERVAL, FRESH_KM_TO_THRESHOLD, type AthleteParams } from "../athlete";
-import type { Goal } from "../goal";
+import { type Goal, defaultDiscipline } from "../goal";
 import type { ArbitratedWeek } from "../arbitration/arbitrate";
 import { estimateSessionTss } from "../trainingLoad";
 import type { Sport } from "../session";
-import { BASELINE_MINUTES_PER_DAY, DEFAULT_PHASE_SHAPE, DOWNGRADE, GOAL_QUALITIES, KIND_MINUTES, KIND_WEIGHT, PHASE_SHAPES, applyCeiling } from "./templates";
+import { BASELINE_MINUTES_PER_DAY, DEFAULT_PHASE_SHAPE, DOWNGRADE, KIND_MINUTES, PHASE_SHAPES, applyCeiling, qualitiesFor, ANCHOR_KIND, kindWeight } from "./templates";
 import type { PlannedSession, PlannedSport, PrescribedWeek, SessionKind } from "./sessionKinds";
 
 // FRESH_KM_TO_THRESHOLD / FRESH_KM_TO_INTERVAL live in shared/athlete.ts,
@@ -102,7 +102,7 @@ function buildDemands(week: ArbitratedWeek, goals: Goal[]): Demand[] {
     const goal = goals.find((g) => g.id === phase.goalId);
     if (!goal) continue;
     const weight = 1 / Math.max(1, goal.priority);
-    GOAL_QUALITIES[phase.goalType].forEach((kind, index) => {
+    qualitiesFor(phase.goalType, goal.discipline).forEach((kind, index) => {
       demands.push({ goalId: goal.id, goalLabel: phase.goalLabel, kind, cost: (index + 1) / weight, priority: goal.priority });
     });
   }
@@ -214,6 +214,10 @@ export function prescribeWeek(week: ArbitratedWeek, goals: Goal[], athlete: Athl
     .filter((entry) => entry.goal)
     .sort((a, b) => a.goal!.priority - b.goal!.priority || a.goal!.targetDate.localeCompare(b.goal!.targetDate))[0];
   const shape = dominant ? (PHASE_SHAPES[dominant.phase.phaseName] ?? DEFAULT_PHASE_SHAPE) : DEFAULT_PHASE_SHAPE;
+  // The dominant goal sets the week's discipline as well as its phase: a
+  // triathlete's week is shaped around the bike even when a second, lower-
+  // priority goal contributes run and strength slots to it.
+  const discipline = dominant?.goal ? (dominant.goal.discipline ?? defaultDiscipline(dominant.goal.type)) : "other";
 
   if (livePhases.length === 0) {
     return { weekStart: week.date, sessions: [], totalMinutes: 0, totalTss: 0, loadMultiplier: week.loadMultiplier, note: "No active goals — nothing to prescribe." };
@@ -267,21 +271,43 @@ export function prescribeWeek(week: ArbitratedWeek, goals: Goal[], athlete: Athl
   // ends up at three hours while the athlete lifts three times.
   const aerobicKinds = picked.map((p) => p.kind).filter((k) => !STRENGTH_KINDS.has(k));
   const budget = Math.round(aerobicKinds.length * BASELINE_MINUTES_PER_DAY * week.loadMultiplier);
-  const aerobicWeight = aerobicKinds.reduce((sum, k) => sum + KIND_WEIGHT[k], 0);
+  const aerobicWeight = aerobicKinds.reduce((sum, k) => sum + kindWeight(k, discipline), 0);
 
   const minutes = new Map<SessionKind, number>();
   for (const kind of aerobicKinds) {
-    const raw = aerobicWeight > 0 ? (budget * KIND_WEIGHT[kind]) / aerobicWeight : KIND_MINUTES[kind].min;
+    const raw = aerobicWeight > 0 ? (budget * kindWeight(kind, discipline)) / aerobicWeight : KIND_MINUTES[kind].min;
     minutes.set(kind, clampKind(kind, Math.round(raw)));
   }
 
-  // The long run is the week's anchor session; it must never come out
-  // shorter than an easy run just because the clamps landed that way.
+  /*
+   * Two dominance rules, because "biggest run" and "biggest session" are the
+   * same thing for a runner and different things for a triathlete.
+   *
+   * Collapsing them — which is what a single hardcoded long-run anchor did —
+   * means that fixing the bike's share of a triathlon week gets immediately
+   * undone: the long run is pushed back above the ride it was just meant to
+   * sit beneath.
+   */
+  const biggestExcept = (except: SessionKind, within?: (k: SessionKind) => boolean) =>
+    Math.max(0, ...aerobicKinds.filter((k) => k !== except && (within?.(k) ?? true)).map((k) => minutes.get(k) ?? 0));
+
+  // 1. The long run outlasts every other RUN — never shorter than an easy run.
   const longMinutes = minutes.get("run_long");
   if (longMinutes != null) {
-    const biggestOther = Math.max(0, ...aerobicKinds.filter((k) => k !== "run_long").map((k) => minutes.get(k) ?? 0));
-    if (longMinutes <= biggestOther) {
-      minutes.set("run_long", clampKind("run_long", Math.round(biggestOther * 1.25)));
+    const biggestOtherRun = biggestExcept("run_long", (k) => SPORT_OF[k] === "run");
+    if (longMinutes <= biggestOtherRun) {
+      minutes.set("run_long", clampKind("run_long", Math.round(biggestOtherRun * 1.25)));
+    }
+  }
+
+  // 2. The discipline's anchor outlasts everything. For a runner this is the
+  //    long run again, so rule 1's result stands and nothing changes.
+  const anchorKind = ANCHOR_KIND[discipline] ?? "run_long";
+  const anchorMinutes = minutes.get(anchorKind);
+  if (anchorMinutes != null) {
+    const biggestOther = biggestExcept(anchorKind);
+    if (anchorMinutes <= biggestOther) {
+      minutes.set(anchorKind, clampKind(anchorKind, Math.round(biggestOther * 1.25)));
     }
   }
 

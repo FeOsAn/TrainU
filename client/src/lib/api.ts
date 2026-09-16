@@ -6,7 +6,10 @@ import type { ArbitratedPlan, ArbitratedWeek } from "@shared/arbitration/arbitra
 import type { PlannedSession, SessionKind } from "@shared/prescription/sessionKinds";
 import type { MacroTarget } from "@shared/nutrition";
 import type { CalibrationReport } from "@shared/calibrationReport";
+export type { AssembledApp };
 import type { ConnectorPreferences, FeaturePreferences } from "@shared/preferences";
+import type { AssembledApp } from "@shared/appShell/assemble";
+import type { Discipline } from "@shared/goal";
 
 export type CompletionStatus = "completed" | "partial" | "skipped";
 
@@ -54,6 +57,7 @@ export const api = {
   goals: () => request<Goal[]>("/api/goals"),
   createGoal: (goal: {
     type: GoalType;
+    discipline?: Discipline;
     label: string;
     targetDate: string;
     priority: number;
@@ -81,6 +85,7 @@ export const api = {
   chatHistory: () => request<Array<{ role: "user" | "assistant"; content: string; createdAt: string }>>("/api/onboarding/history"),
   chat: (message: string) => request<{ reply: string; toolResults: string[] }>("/api/onboarding/chat", { method: "POST", body: JSON.stringify({ message }) }),
 
+  appShell: () => request<AssembledApp>("/api/app-shell"),
   preferences: () => request<{ connectors: ConnectorPreferences; features: FeaturePreferences }>("/api/preferences"),
   patchConnectors: (patch: Partial<ConnectorPreferences>) => request<ConnectorPreferences>("/api/preferences/connectors", { method: "PATCH", body: JSON.stringify(patch) }),
   patchFeatures: (patch: Partial<FeaturePreferences>) => request<FeaturePreferences>("/api/preferences/features", { method: "PATCH", body: JSON.stringify(patch) }),
