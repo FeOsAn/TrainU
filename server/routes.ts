@@ -22,11 +22,11 @@ import { dailyTargets } from "@shared/nutrition";
 import { InvalidCompletionError, listCompletions, recordCompletion, summariseAdherence, type CompletionStatus } from "./completionsService";
 import { createGoal, InvalidGoalError, listGoals } from "./goalsService";
 import { chatOnboarding } from "./onboarding";
-import { getPreferences, updateConnectorPreferences, updateFeaturePreferences } from "./preferencesService";
+import { getPreferences, updateBlockPreferences, updateConnectorPreferences, updateFeaturePreferences } from "./preferencesService";
 import { connectGarmin, syncGarmin } from "./connectors/garmin";
 import { exchangeWhoopCode, getWhoopAuthorizationUrl, syncWhoop } from "./connectors/whoop";
 import { importAppleHealthExport } from "./connectors/appleHealth";
-import { getAppShell, listGapQueue, recordGaps } from "./appShellService";
+import { getAppShell, listBlockChoices, listGapQueue, recordGaps } from "./appShellService";
 import { getCalibrationMultiplier, getCalibrationReport, OutcomeNotFoundError, recordOutcome } from "./calibrationService";
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -311,6 +311,28 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
     const app_ = getAppShell(requested);
     recordGaps(app_);
     res.json(app_);
+  });
+
+  /** Every block, what the assembler decided, and what the athlete chose instead. */
+  app.get("/api/app-shell/blocks", (_req, res) => {
+    res.json({ blocks: listBlockChoices() });
+  });
+
+  app.patch("/api/preferences/blocks", (req, res) => {
+    const body = req.body;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return res.status(400).json({ error: "body must be an object of blockId -> \"on\" | \"off\" | null" });
+    }
+    const known = new Set(listBlockChoices().map((b) => b.id));
+    const patch: Record<string, "on" | "off" | null> = {};
+    for (const [blockId, choice] of Object.entries(body)) {
+      if (!known.has(blockId)) return res.status(400).json({ error: `unknown block: ${blockId}` });
+      if (choice !== "on" && choice !== "off" && choice !== null) {
+        return res.status(400).json({ error: `choice for ${blockId} must be "on", "off" or null` });
+      }
+      patch[blockId] = choice;
+    }
+    res.json(updateBlockPreferences(patch));
   });
 
   /** The build queue, accumulated across every assembly. Ours to read, not the athlete's. */

@@ -20,8 +20,10 @@
 
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
+import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import path from "node:path";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import { APP_ID } from "@shared/schema";
 
 const FOREIGN_SIGNATURES: Array<{ table: string; column: string; app: string }> = [
@@ -89,4 +91,33 @@ function open(): Database.Database {
 
 export const sqlite = open();
 export const db = drizzle(sqlite);
+
+/**
+ * Bring the schema up to date on every boot.
+ *
+ * `drizzle-kit push` is a development convenience and is not available in a
+ * deployed container — so without this, a fresh volume gives you a database
+ * file containing nothing but the identity stamp, and every single endpoint
+ * 500s on "no such table". Committed migrations applied at startup is the
+ * only version of this that survives a deploy.
+ *
+ * Idempotent: drizzle records which migrations have run in its own table, so
+ * a restart against an up-to-date database is a no-op.
+ */
+function migrationsFolder(): string {
+  // Resolved relative to this file so it works from `tsx server/index.ts` in
+  // development and from the esbuild bundle at dist/index.js in production,
+  // which have different __dirname values.
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  for (const candidate of [path.resolve(here, "../migrations"), path.resolve(here, "./migrations"), path.resolve(process.cwd(), "migrations")]) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  throw new Error("Refusing to start: no migrations folder found. Run `npx drizzle-kit generate` and commit migrations/.");
+}
+
+// Migrate BEFORE stamping: `app_identity` is part of the schema, so the
+// migration creates it. Stamping first left a table the migration then tried
+// to create again, which failed the whole boot on a fresh volume — the exact
+// situation this code exists to handle.
+migrate(db, { migrationsFolder: migrationsFolder() });
 stampIdentity(sqlite);

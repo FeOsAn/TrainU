@@ -4,6 +4,7 @@ import type { Request } from "express";
 import { createServer } from "node:http";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
+import { registerAuth, requireAuth } from "./auth";
 
 const app = express();
 const httpServer = createServer(app);
@@ -31,6 +32,11 @@ process.on("unhandledRejection", (reason) => {
 });
 
 (async () => {
+  // Auth first: registerAuth adds the login endpoints, requireAuth gates
+  // everything registered after it.
+  registerAuth(app);
+  app.use(requireAuth);
+
   await registerRoutes(httpServer, app);
 
   app.use("/api", (_req: Request, res: Response) => {

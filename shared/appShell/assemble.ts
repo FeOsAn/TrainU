@@ -18,7 +18,7 @@
  */
 
 import { type Goal, type GoalType, defaultDiscipline } from "../goal";
-import type { ConnectorPreferences, FeaturePreferences } from "../preferences";
+import { type BlockPreferences, type ConnectorPreferences, type FeaturePreferences, DEFAULT_BLOCK_PREFERENCES } from "../preferences";
 import {
   type Block,
   type Capability,
@@ -65,19 +65,31 @@ const SURFACE_TITLES: Record<SurfaceId, string> = {
   data: "Data",
 };
 
+/** Display order, which is also nav order. */
+const ALL_SURFACES: SurfaceId[] = ["plan", "goals", "athlete", "coach", "data"];
+
 /**
- * Surfaces every athlete keeps regardless of their goals. Goals and Coach are
- * how you change the goal model — assembling them away off the goal model
- * would make an athlete with no goals unable to add one.
+ * Surfaces that survive even when empty. Goals and Coach are how you change
+ * the goal model — assembling them away would leave an athlete with no goals
+ * unable to add one, and someone who switched every block off unable to
+ * switch one back on. Plan is the product.
+ *
+ * Everything else collapses when it holds nothing, so five tabs is a default
+ * rather than a fixed shape.
  */
-const ALWAYS_SURFACES: SurfaceId[] = ["plan", "goals", "coach", "athlete", "data"];
+const ESSENTIAL_SURFACES = new Set<SurfaceId>(["plan", "goals", "coach"]);
 
 /** A goal still influencing the app: active, and not already in the past. */
 export function isLiveGoal(goal: Goal, today: string): boolean {
   return goal.active && goal.targetDate >= today;
 }
 
-function blockApplies(block: Block, goals: Goal[], connectors: ConnectorPreferences, features: FeaturePreferences): boolean {
+/**
+ * Does the goal model imply this block? Separate from `blockApplies` so an
+ * explicit athlete choice can override the inference without the two getting
+ * tangled together.
+ */
+function inferredFromGoals(block: Block, goals: Goal[], connectors: ConnectorPreferences, features: FeaturePreferences): boolean {
   if (block.requiresFeature && !features[block.requiresFeature]) return false;
   if (block.requiresConnector && !connectors[block.requiresConnector]) return false;
   if (block.goalTypes === "*") return true;
@@ -90,11 +102,27 @@ function blockApplies(block: Block, goals: Goal[], connectors: ConnectorPreferen
   });
 }
 
+function blockApplies(
+  block: Block,
+  goals: Goal[],
+  connectors: ConnectorPreferences,
+  features: FeaturePreferences,
+  blockPrefs: BlockPreferences,
+): boolean {
+  // The athlete's explicit answer wins over anything inferred from their
+  // goals, in both directions. Inference is a good default, not a verdict.
+  const choice = blockPrefs[block.id];
+  if (choice === "off") return false;
+  if (choice === "on") return true;
+  return inferredFromGoals(block, goals, connectors, features);
+}
+
 export function assembleApp(
   goals: Goal[],
   connectors: ConnectorPreferences,
   features: FeaturePreferences,
   today: string,
+  blockPrefs: BlockPreferences = DEFAULT_BLOCK_PREFERENCES,
 ): AssembledApp {
   const live = goals.filter((goal) => isLiveGoal(goal, today));
 
@@ -102,18 +130,27 @@ export function assembleApp(
   // universal block applies and nothing goal-specific does. That's the
   // correct empty state: a new athlete sees the shell and the coach, not a
   // page of triathlon fields they never asked for.
-  const applicable = BLOCKS.filter((block) => blockApplies(block, live, connectors, features));
+  const applicable = BLOCKS.filter((block) => blockApplies(block, live, connectors, features, blockPrefs));
+
+  // A block the athlete switched off must also stop reporting its gap.
+  // Continuing to tell someone that a feature they declined isn't built yet
+  // is nagging dressed up as honesty.
+  const declined = new Set<Capability>();
+  for (const block of BLOCKS) {
+    if (blockPrefs[block.id] !== "off") continue;
+    for (const capability of block.provides) declined.add(capability);
+  }
   const built = applicable.filter((block) => block.status === "built");
   const renderable = built.filter((block) => block.surface !== "engine");
 
-  const surfaces: AssembledSurface[] = ALWAYS_SURFACES.map((id) => ({
+  const surfaces: AssembledSurface[] = ALL_SURFACES.map((id) => ({
     id,
     title: SURFACE_TITLES[id],
     blocks: renderable
       .filter((block) => block.surface === id)
       .sort((a, b) => a.rank - b.rank || a.id.localeCompare(b.id))
       .map((block) => ({ id: block.id, title: block.title, ...(block.note ? { note: block.note } : {}) })),
-  }));
+  })).filter((surface) => surface.blocks.length > 0 || ESSENTIAL_SURFACES.has(surface.id));
 
   const provided = new Set<Capability>();
   for (const block of built) for (const capability of block.provides) provided.add(capability);
@@ -125,7 +162,7 @@ export function assembleApp(
     const discipline = goal.discipline ?? defaultDiscipline(goal.type);
     const needs = [...(CAPABILITY_NEEDS[goal.type] ?? []), ...(DISCIPLINE_NEEDS[discipline] ?? [])];
     for (const capability of needs) {
-      if (provided.has(capability)) continue;
+      if (provided.has(capability) || declined.has(capability)) continue;
       const list = wantedBy.get(capability) ?? [];
       if (!list.includes(goal.label)) list.push(goal.label);
       wantedBy.set(capability, list);
@@ -143,11 +180,25 @@ export function assembleApp(
     }
   }
 
+  // Switching an unbuilt block ON is itself a statement of need — arguably the
+  // clearest one the athlete can make. Reporting the gap is the honest answer;
+  // silently doing nothing with their choice is the failure mode this whole
+  // catalog exists to prevent.
+  for (const block of BLOCKS) {
+    if (blockPrefs[block.id] !== "on" || block.status === "built") continue;
+    for (const capability of block.provides) {
+      if (provided.has(capability)) continue;
+      const list = wantedBy.get(capability) ?? [];
+      if (!list.includes(STATED_PREFERENCE)) list.push(STATED_PREFERENCE);
+      wantedBy.set(capability, list);
+    }
+  }
+
   // A preference the athlete stated is demand too — see FEATURE_NEEDS.
   for (const [feature, needs] of Object.entries(FEATURE_NEEDS) as Array<[keyof FeaturePreferences, Capability[]]>) {
     if (!features[feature]) continue;
     for (const capability of needs) {
-      if (provided.has(capability)) continue;
+      if (provided.has(capability) || declined.has(capability)) continue;
       const list = wantedBy.get(capability) ?? [];
       if (!list.includes(STATED_PREFERENCE)) list.push(STATED_PREFERENCE);
       wantedBy.set(capability, list);

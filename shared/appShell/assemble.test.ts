@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Goal, GoalType, Discipline } from "../goal";
-import { DEFAULT_CONNECTOR_PREFERENCES, DEFAULT_FEATURE_PREFERENCES } from "../preferences";
+import { type BlockPreferences, DEFAULT_CONNECTOR_PREFERENCES, DEFAULT_FEATURE_PREFERENCES } from "../preferences";
 import { assembleApp, STATED_PREFERENCE } from "./assemble";
 import { BLOCKS, CAPABILITY_LABELS, CAPABILITY_NEEDS, DISCIPLINE_NEEDS, FEATURE_NEEDS, type Capability } from "./blocks";
 
@@ -23,8 +23,8 @@ function goal(type: GoalType, label: string, opts: { discipline?: Discipline; ta
   };
 }
 
-function assemble(goals: Goal[], features = DEFAULT_FEATURE_PREFERENCES) {
-  return assembleApp(goals, DEFAULT_CONNECTOR_PREFERENCES, features, TODAY);
+function assemble(goals: Goal[], features = DEFAULT_FEATURE_PREFERENCES, blocks: BlockPreferences = {}) {
+  return assembleApp(goals, DEFAULT_CONNECTOR_PREFERENCES, features, TODAY, blocks);
 }
 
 function blockIds(app: ReturnType<typeof assemble>, surface: string): string[] {
@@ -191,4 +191,68 @@ test("every block is reachable — nothing serves a goal type that never asks fo
 test("assembly is deterministic — the same goal model always produces the same app", () => {
   const goals = [goal("endurance_race", "Ironman 70.3", { discipline: "triathlon" }), goal("body_composition", "Wedding")];
   assert.deepEqual(assemble(goals), assemble([...goals].reverse()), "goal order must not change the app");
+});
+
+
+// ─── Athlete overrides ───────────────────────────────────────────────────────
+
+test("an athlete can switch ON a block their goals don't imply", () => {
+  // A marathoner who also rides. Inference gets the default right most of the
+  // time; "most of the time" can't be the only mechanism.
+  const goals = [goal("endurance_race", "Berlin Marathon", { discipline: "run" })];
+  assert.ok(!blockIds(assemble(goals), "athlete").includes("athlete.bikeSwim"));
+  assert.ok(blockIds(assemble(goals, DEFAULT_FEATURE_PREFERENCES, { "athlete.bikeSwim": "on" }), "athlete").includes("athlete.bikeSwim"));
+});
+
+test("an athlete can switch OFF a block their goals do imply", () => {
+  const goals = [goal("endurance_race", "Ironman 70.3", { discipline: "triathlon" })];
+  assert.ok(blockIds(assemble(goals), "athlete").includes("athlete.bikeSwim"));
+  assert.ok(!blockIds(assemble(goals, DEFAULT_FEATURE_PREFERENCES, { "athlete.bikeSwim": "off" }), "athlete").includes("athlete.bikeSwim"));
+});
+
+test("switching a block off also silences its gap", () => {
+  // Someone doing a cut who finds progress photos miserable should not keep
+  // being told that the thing they declined isn't built yet. That's nagging,
+  // not honesty.
+  const goals = [goal("body_composition", "Wedding")];
+  const on = assemble(goals, { physiqueTracking: true });
+  assert.ok(on.gaps.some((g) => g.capability === "physique_tracking"));
+
+  const off = assemble(goals, { physiqueTracking: true }, { "athlete.physique": "off" });
+  assert.ok(!off.gaps.some((g) => g.capability === "physique_tracking"));
+});
+
+test("clearing an override hands the decision back to the assembler", () => {
+  const goals = [goal("endurance_race", "Ironman 70.3", { discipline: "triathlon" })];
+  const withOverride = assemble(goals, DEFAULT_FEATURE_PREFERENCES, { "athlete.bikeSwim": "off" });
+  const cleared = assemble(goals, DEFAULT_FEATURE_PREFERENCES, {});
+  assert.ok(!blockIds(withOverride, "athlete").includes("athlete.bikeSwim"));
+  assert.ok(blockIds(cleared, "athlete").includes("athlete.bikeSwim"), "'let the app decide' has to stay reachable after an override");
+});
+
+test("an override cannot conjure a block that isn't built", () => {
+  const goals = [goal("body_composition", "Wedding")];
+  const app = assemble(goals, DEFAULT_FEATURE_PREFERENCES, { "athlete.physique": "on" });
+  assert.ok(!blockIds(app, "athlete").includes("athlete.physique"), "wanting it does not implement it");
+  assert.ok(app.gaps.some((g) => g.capability === "physique_tracking"), "and asking for it explicitly is exactly when the gap should be reported");
+});
+
+// ─── Surfaces collapse ───────────────────────────────────────────────────────
+
+test("a surface with nothing on it disappears", () => {
+  const goals = [goal("body_composition", "Wedding")];
+  const stripped = assemble(goals, DEFAULT_FEATURE_PREFERENCES, {
+    "data.load": "off",
+    "data.sessions": "off",
+    "data.calibration": "off",
+  });
+  assert.ok(!stripped.surfaces.some((s) => s.id === "data"), "five tabs is a default, not a fixed shape");
+});
+
+test("the surfaces you need to change your own mind never disappear", () => {
+  const goals = [goal("body_composition", "Wedding")];
+  const stripped = assemble(goals, DEFAULT_FEATURE_PREFERENCES, Object.fromEntries(BLOCKS.map((b) => [b.id, "off" as const])));
+  const ids = stripped.surfaces.map((s) => s.id);
+  assert.ok(ids.includes("goals") && ids.includes("coach") && ids.includes("plan"),
+    "an athlete who switched everything off must still be able to switch something back on");
 });

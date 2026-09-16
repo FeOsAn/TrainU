@@ -109,6 +109,8 @@ export const preferences = sqliteTable("preferences", {
   id: text("id").primaryKey(),
   connectorsJson: text("connectors_json").notNull().default("{}"),
   featuresJson: text("features_json").notNull().default("{}"),
+  /** BlockPreferences — the athlete's explicit on/off over the assembler. See shared/preferences.ts. */
+  blocksJson: text("blocks_json").notNull().default("{}"),
   updatedAt: text("updated_at").notNull(),
 });
 

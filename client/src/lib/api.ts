@@ -11,6 +11,17 @@ import type { ConnectorPreferences, FeaturePreferences } from "@shared/preferenc
 import type { AssembledApp } from "@shared/appShell/assemble";
 import type { Discipline } from "@shared/goal";
 
+export interface BlockChoiceRow {
+  id: string;
+  title: string;
+  surface: string;
+  note?: string;
+  status: "built" | "planned";
+  choice: "on" | "off" | null;
+  active: boolean;
+  overridden: boolean;
+}
+
 export type CompletionStatus = "completed" | "partial" | "skipped";
 
 export interface SessionCompletion {
@@ -41,6 +52,9 @@ export interface PlanWeek {
 }
 
 /** The server serves this client (see server/vite.ts), so /api is same-origin — no base URL, no proxy. */
+/** Thrown on a 401 so the shell can show the login screen instead of an error per panel. */
+export class UnauthorizedError extends Error {}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     ...init,
@@ -48,7 +62,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body?.error ?? body?.message ?? `${res.status} ${res.statusText}`);
+    const message = body?.error ?? body?.message ?? `${res.status} ${res.statusText}`;
+    if (res.status === 401) throw new UnauthorizedError(message);
+    throw new Error(message);
   }
   return res.json() as Promise<T>;
 }
@@ -85,6 +101,11 @@ export const api = {
   chatHistory: () => request<Array<{ role: "user" | "assistant"; content: string; createdAt: string }>>("/api/onboarding/history"),
   chat: (message: string) => request<{ reply: string; toolResults: string[] }>("/api/onboarding/chat", { method: "POST", body: JSON.stringify({ message }) }),
 
+  authStatus: () => request<{ authenticated: boolean; passwordRequired: boolean }>("/api/auth/status"),
+  login: (password: string) => request<{ ok: true }>("/api/auth/login", { method: "POST", body: JSON.stringify({ password }) }),
+  blockChoices: () => request<{ blocks: BlockChoiceRow[] }>("/api/app-shell/blocks"),
+  patchBlocks: (patch: Record<string, "on" | "off" | null>) =>
+    request<Record<string, "on" | "off">>("/api/preferences/blocks", { method: "PATCH", body: JSON.stringify(patch) }),
   appShell: () => request<AssembledApp>("/api/app-shell"),
   preferences: () => request<{ connectors: ConnectorPreferences; features: FeaturePreferences }>("/api/preferences"),
   patchConnectors: (patch: Partial<ConnectorPreferences>) => request<ConnectorPreferences>("/api/preferences/connectors", { method: "PATCH", body: JSON.stringify(patch) }),

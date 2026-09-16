@@ -12,12 +12,54 @@ import { sql } from "drizzle-orm";
 import { db } from "./db";
 import { capabilityGaps } from "@shared/schema";
 import { assembleApp, type AssembledApp } from "@shared/appShell/assemble";
+import { BLOCKS } from "@shared/appShell/blocks";
 import { listGoals } from "./goalsService";
 import { getPreferences } from "./preferencesService";
 
 export function getAppShell(today = new Date().toISOString().slice(0, 10)): AssembledApp {
-  const { connectors, features } = getPreferences();
-  return assembleApp(listGoals(), connectors, features, today);
+  const { connectors, features, blocks } = getPreferences();
+  return assembleApp(listGoals(), connectors, features, today, blocks);
+}
+
+/**
+ * Every block in the catalog with what the assembler decided and why, so the
+ * athlete can see and change it. Without this the overrides exist but are
+ * unreachable — you can't switch on a block you were never shown.
+ */
+export interface BlockChoiceRow {
+  id: string;
+  title: string;
+  surface: string;
+  note?: string;
+  status: "built" | "planned";
+  /** What the athlete explicitly chose, if anything. */
+  choice: "on" | "off" | null;
+  /** Whether it's currently part of their app. */
+  active: boolean;
+  /** True when the athlete's choice differs from what their goals imply. */
+  overridden: boolean;
+}
+
+export function listBlockChoices(today = new Date().toISOString().slice(0, 10)): BlockChoiceRow[] {
+  const { connectors, features, blocks } = getPreferences();
+  const goals = listGoals();
+  const inferred = assembleApp(goals, connectors, features, today, {});
+  const actual = assembleApp(goals, connectors, features, today, blocks);
+
+  const idsIn = (app: AssembledApp) => new Set(app.surfaces.flatMap((s) => s.blocks.map((b) => b.id)));
+  const inferredIds = idsIn(inferred);
+  const actualIds = idsIn(actual);
+
+  return BLOCKS.filter((block) => block.surface !== "engine").map((block) => ({
+    id: block.id,
+    title: block.title,
+    surface: block.surface,
+    ...(block.note ? { note: block.note } : {}),
+    status: block.status,
+    choice: blocks[block.id] ?? null,
+    active: actualIds.has(block.id),
+    overridden: actualIds.has(block.id) !== inferredIds.has(block.id),
+  }));
 }
 
 /** Upsert each reported gap. Never throws into the request path — a failed log must not cost the athlete their app. */

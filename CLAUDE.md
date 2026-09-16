@@ -357,6 +357,70 @@ causes a support conversation.
   would also change every multi-easy-run week — worth doing deliberately, not
   as a side effect of this phase.
 
+- **Phase 9 (done)** — deployable, and the athlete gets a say.
+
+  **Three things blocked or endangered a real deploy**, found by building the
+  production bundle and booting it against an empty volume rather than by
+  reasoning about it:
+  1. **No schema on boot.** `drizzle-kit push` is a dev command and isn't
+     available in a deployed container, so a fresh volume gave a database
+     containing nothing but the identity stamp and every endpoint 500'd on
+     "no such table". Migrations are now generated, committed, and applied by
+     `migrate()` at startup. `pretest` no longer runs `push` either, so the
+     test suite builds its schema through the same path a deploy does.
+     (Ordering matters: `app_identity` is part of the schema, so stamping
+     before migrating made the migration fail trying to create a table that
+     already existed. Migrate first, then stamp.)
+  2. **No auth.** Every row is keyed `"self"` — correct for a personal app,
+     dangerous the moment it has a public URL. `server/auth.ts` gates every
+     `/api` route behind one shared password in an HTTP-only cookie. It
+     **fails closed in production**: with no `APP_PASSWORD` set it refuses to
+     serve rather than serving openly, because an app that silently publishes
+     a training history because an env var was forgotten is worse than one
+     that won't start.
+  3. **Garmin passwords in plaintext.** Garmin has no OAuth for a hobbyist
+     app, so syncing means holding the athlete's actual account password — on
+     a laptop that's roughly as safe as the laptop, on hosted infrastructure
+     it is a real credential in someone else's database, very often shared
+     with other accounts. `server/secrets.ts` does AES-256-GCM under
+     `CREDENTIAL_KEY`, applied in `credentialsService.ts` so that *every*
+     secret crosses one boundary — a future connector cannot forget to
+     encrypt. Also fails closed in production. Legacy plaintext rows read
+     through unchanged and get sealed on the next write, so no migration.
+
+  **Athlete overrides**, because inference alone was too rigid. The assembler
+  gets the default right most of the time, and "most of the time" can't be the
+  only mechanism: a runner who also rides wants their FTP tracked, someone on
+  a cut who finds progress photos miserable wants that gone. Neither is
+  expressible as a goal. `BlockPreferences` is an explicit `on`/`off` per
+  block that beats inference in both directions, with `null` handing the
+  decision back — "let my goals decide" has to stay reachable once you've
+  overridden something. Two consequences worth stating:
+  - switching a block **off** silences its gap, because telling someone a
+    feature they declined isn't built yet is nagging dressed up as honesty;
+  - switching an unbuilt block **on** *creates* a gap, since that's the
+    clearest statement of need an athlete can make.
+
+  **Surfaces collapse when empty**, so five tabs is a default rather than a
+  fixed shape — the nav is assembled from the same answer the pages are, since
+  a hardcoded nav leaves a tab pointing at a page with nothing on it, which
+  looks broken rather than plain. Plan, Goals and Coach survive regardless:
+  an athlete who switched everything off must still be able to switch
+  something back on. A new **Your app** page (`/app`) lists every block with
+  what the assembler decided, what the athlete chose instead, and whether the
+  two differ.
+
+  191 tests, `tsc` clean. **Verified against the real production bundle**, not
+  the dev server: built, booted against an empty directory, migrations created
+  12 tables, `/api/goals` 401 without a cookie and 200 with one, a wrong
+  password rejected, `NODE_ENV=production` with no `APP_PASSWORD` refusing to
+  serve, and a stored Garmin password confirmed as `enc.v1:…` ciphertext on
+  disk while round-tripping correctly through the service. Then in a browser:
+  switching all three Data blocks off removes the Data tab, "let my goals
+  decide" brings it back, and bad override input (unknown block, invalid
+  choice, array body) returns 400 — zero console, page or HTTP errors.
+
+
 ## Client
 
 Everything above was API-only until the client was built — five routes under
@@ -424,5 +488,21 @@ Phase 6 opened for predictions, one level down at the session.
 npm install
 npm run dev     # http://localhost:5000
 npm run check   # tsc
-npm test        # shared/*.test.ts, shared/predictors/*.test.ts, server/*.test.ts
+npm test        # shared/, shared/predictors/, shared/arbitration/,
+                # shared/prescription/, shared/appShell/, server/
+npm run build   # vite + esbuild -> dist/
+npm start       # production, serves dist/public
 ```
+
+## Deploying
+
+See `.env.example` for every variable and what happens without it. The short
+version: `APP_PASSWORD` and `CREDENTIAL_KEY` are required — a production
+instance refuses to serve data without the first and refuses to store a
+third-party credential without the second. `DB_PATH` must point inside a
+mounted volume or every deploy wipes the athlete's history; it defaults to
+`/data/trainu.db`, which matches a volume mounted at `/data`.
+
+Migrations run automatically on boot, so a fresh volume comes up with a
+complete schema. `migrations/` is generated by `npx drizzle-kit generate` and
+**must be committed** — the deployed container has no drizzle-kit.

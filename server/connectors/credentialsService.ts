@@ -1,8 +1,22 @@
+/**
+ * Credential persistence, and the one place secrets get encrypted.
+ *
+ * Every secret crosses this boundary — a Garmin password, a Garmin session
+ * token, a Whoop access and refresh token — so encrypting here rather than at
+ * each call site means a new connector cannot forget to. The alternative,
+ * encrypting in garmin.ts and whoop.ts separately, is two implementations
+ * that drift, and the one that drifts writes plaintext.
+ */
 import { eq } from "drizzle-orm";
 import { db } from "../db";
 import { garminCredentials, whoopCredentials } from "@shared/schema";
+import { decryptSecret, encryptSecret } from "../secrets";
 
 const ROW_ID = "self";
+
+/** null passes through untouched — an absent secret must stay absent, not become ciphertext of "". */
+const seal = (v: string | null | undefined): string | null => (v == null ? null : encryptSecret(v));
+const open_ = (v: string | null): string | null => (v == null ? null : decryptSecret(v));
 
 export interface GarminCreds {
   email: string | null;
@@ -15,7 +29,13 @@ export interface GarminCreds {
 export function getGarminCredentials(): GarminCreds | null {
   const row = db.select().from(garminCredentials).where(eq(garminCredentials.id, ROW_ID)).get();
   if (!row) return null;
-  return { email: row.email, password: row.password, tokenJson: row.tokenJson, tokenExpiresAt: row.tokenExpiresAt, authError: row.authError };
+  return {
+    email: row.email,
+    password: open_(row.password),
+    tokenJson: open_(row.tokenJson),
+    tokenExpiresAt: row.tokenExpiresAt,
+    authError: row.authError,
+  };
 }
 
 export function saveGarminCredentials(patch: Partial<GarminCreds>): void {
@@ -24,8 +44,8 @@ export function saveGarminCredentials(patch: Partial<GarminCreds>): void {
   const now = new Date().toISOString();
   const values = {
     email: merged.email ?? null,
-    password: merged.password ?? null,
-    tokenJson: merged.tokenJson ?? null,
+    password: seal(merged.password),
+    tokenJson: seal(merged.tokenJson),
     tokenExpiresAt: merged.tokenExpiresAt ?? null,
     authError: merged.authError ?? null,
     updatedAt: now,
@@ -47,7 +67,12 @@ export interface WhoopCreds {
 export function getWhoopCredentials(): WhoopCreds | null {
   const row = db.select().from(whoopCredentials).where(eq(whoopCredentials.id, ROW_ID)).get();
   if (!row) return null;
-  return { accessToken: row.accessToken, refreshToken: row.refreshToken, tokenExpiresAt: row.tokenExpiresAt, authError: row.authError };
+  return {
+    accessToken: open_(row.accessToken),
+    refreshToken: open_(row.refreshToken),
+    tokenExpiresAt: row.tokenExpiresAt,
+    authError: row.authError,
+  };
 }
 
 export function saveWhoopCredentials(patch: Partial<WhoopCreds>): void {
@@ -55,8 +80,8 @@ export function saveWhoopCredentials(patch: Partial<WhoopCreds>): void {
   const merged = { ...current, ...patch };
   const now = new Date().toISOString();
   const values = {
-    accessToken: merged.accessToken ?? null,
-    refreshToken: merged.refreshToken ?? null,
+    accessToken: seal(merged.accessToken),
+    refreshToken: seal(merged.refreshToken),
     tokenExpiresAt: merged.tokenExpiresAt ?? null,
     authError: merged.authError ?? null,
     updatedAt: now,
