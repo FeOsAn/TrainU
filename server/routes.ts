@@ -15,7 +15,11 @@ import { predictRunRace, predictTriathlon, TRIATHLON_DISTANCES, type TriathlonDi
 import { predictHyrox } from "@shared/predictors/hyrox";
 import { predictBodyComposition } from "@shared/predictors/bodyComposition";
 import { predictStrength, type LiftId } from "@shared/predictors/strength";
-import { arbitratePlan } from "@shared/arbitration/arbitrate";
+import { arbitratePlan, arbitrateWeek } from "@shared/arbitration/arbitrate";
+import { prescribeWeek } from "@shared/prescription/prescribe";
+import { sessionCompletionKey, type SessionKind } from "@shared/prescription/sessionKinds";
+import { dailyTargets } from "@shared/nutrition";
+import { InvalidCompletionError, listCompletions, recordCompletion, summariseAdherence, type CompletionStatus } from "./completionsService";
 import { createGoal, InvalidGoalError, listGoals } from "./goalsService";
 import { chatOnboarding } from "./onboarding";
 import { getPreferences, updateConnectorPreferences, updateFeaturePreferences } from "./preferencesService";
@@ -28,6 +32,24 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 
 const uploadLarge = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 const ATHLETE_ROW_ID = "self";
+
+function addDays(date: string, days: number): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Monday-start, so "this week" means the same thing to the plan engine and the athlete. */
+function startOfWeek(date: string): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  const dayOfWeek = (d.getUTCDay() + 6) % 7; // Monday = 0
+  return addDays(date, -dayOfWeek);
+}
+
+function parseDaysPerWeek(raw: unknown): number | undefined {
+  const n = typeof raw === "string" ? parseInt(raw, 10) : undefined;
+  return n != null && Number.isFinite(n) ? n : undefined;
+}
 
 function getAthleteRow(): AthleteRow | null {
   const row = db.select().from(athleteMeasurements).where(eq(athleteMeasurements.id, ATHLETE_ROW_ID)).get();
@@ -268,6 +290,80 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
     const plan = arbitratePlan(activeGoals, from, to, getAthleteParams());
     logPrediction("plan:arbitration", null, plan);
     res.json(plan);
+  });
+
+  // ─── The week: what to actually do, and what to eat ─────────────────────
+  // One call, because this is the screen an athlete opens every morning:
+  // the arbitrated week, the sessions it resolves to, each day's macro
+  // targets, and which sessions have already been ticked off.
+  app.get("/api/plan/week", (req, res) => {
+    const requested = typeof req.query.date === "string" ? req.query.date : new Date().toISOString().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(requested) || Number.isNaN(Date.parse(`${requested}T00:00:00Z`))) {
+      return res.status(400).json({ error: "date must be YYYY-MM-DD" });
+    }
+    const weekStart = startOfWeek(requested);
+    const athlete = getAthleteParams();
+    const activeGoals = listGoals().filter((g) => g.active);
+
+    const arbitrated = arbitrateWeek(activeGoals, weekStart, athlete);
+    const prescribed = prescribeWeek(arbitrated, activeGoals, athlete, { daysPerWeek: parseDaysPerWeek(req.query.daysPerWeek) });
+
+    const weekEnd = addDays(weekStart, 6);
+    const completions = listCompletions(weekStart, weekEnd);
+    const completionByKey = new Map(completions.map((c) => [c.key, c]));
+
+    // The deficit is sized off the rate the body-composition goal's deadline
+    // actually demands — carried through on its phase rather than recomputed.
+    const requiredWeeklyChangeKg = arbitrated.goalPhases.find((p) => p.requiredWeeklyChangeKg != null)?.requiredWeeklyChangeKg ?? null;
+
+    const days = Array.from({ length: 7 }, (_, offset) => {
+      const date = addDays(weekStart, offset);
+      const sessions = prescribed.sessions
+        .filter((s) => s.date === date)
+        .map((s) => ({ ...s, completion: completionByKey.get(sessionCompletionKey(s.date, s.kind)) ?? null }));
+      const dailyTss = sessions.reduce((sum, s) => sum + s.tss, 0);
+      return {
+        date,
+        sessions,
+        dailyTss,
+        nutrition: dailyTargets(athlete, { stance: arbitrated.nutritionStance, requiredWeeklyChangeKg, dailyTss }),
+      };
+    });
+
+    res.json({
+      weekStart,
+      arbitrated,
+      days,
+      totalMinutes: prescribed.totalMinutes,
+      totalTss: prescribed.totalTss,
+      note: prescribed.note,
+      adherence: summariseAdherence(completions, prescribed.sessions.length),
+    });
+  });
+
+  app.post("/api/sessions/complete", (req, res) => {
+    const body = req.body as { date?: string; kind?: SessionKind; status?: CompletionStatus; rpe?: number; note?: string; prescribed?: any };
+    try {
+      res.json(
+        recordCompletion({
+          date: String(body.date ?? ""),
+          kind: body.kind as SessionKind,
+          status: body.status as CompletionStatus,
+          rpe: body.rpe ?? null,
+          note: body.note ?? null,
+          prescribed: body.prescribed ?? null,
+        }),
+      );
+    } catch (e) {
+      if (e instanceof InvalidCompletionError) return res.status(400).json({ error: e.message });
+      throw e;
+    }
+  });
+
+  app.get("/api/completions", (req, res) => {
+    const from = typeof req.query.from === "string" ? req.query.from : undefined;
+    const to = typeof req.query.to === "string" ? req.query.to : undefined;
+    res.json(listCompletions(from, to));
   });
 
   // ─── Onboarding chat (Phase 4) ──────────────────────────────────────────

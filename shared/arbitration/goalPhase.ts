@@ -20,6 +20,13 @@ export interface GoalPhase {
   loadMultiplier: number;
   nutritionStance: NutritionStance;
   notes: string;
+  /**
+   * Only set by body-composition goals: the rate the deadline actually
+   * demands, from predictBodyComposition. Carried through so shared/nutrition.ts
+   * can size the deficit off the real number instead of recomputing it or
+   * falling back to a stock "20% cut".
+   */
+  requiredWeeklyChangeKg?: number | null;
 }
 
 function weeksUntil(fromDate: string, targetDate: string): number {
@@ -72,6 +79,7 @@ function phaseForBodyComposition(goal: Goal, date: string, athlete: AthleteParam
     loadMultiplier: isLoss ? 0.9 : 1.05,
     nutritionStance: isLoss ? "deficit" : "surplus",
     notes: prediction.note,
+    requiredWeeklyChangeKg: prediction.requiredWeeklyChangeKg,
   };
 }
 

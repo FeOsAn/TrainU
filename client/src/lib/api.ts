@@ -2,9 +2,40 @@ import type { AthleteParams } from "@shared/athlete";
 import type { Goal, GoalType } from "@shared/goal";
 import type { TrainingSession } from "@shared/session";
 import type { TrainingLoadSummary } from "@shared/trainingLoad";
-import type { ArbitratedPlan } from "@shared/arbitration/arbitrate";
+import type { ArbitratedPlan, ArbitratedWeek } from "@shared/arbitration/arbitrate";
+import type { PlannedSession, SessionKind } from "@shared/prescription/sessionKinds";
+import type { MacroTarget } from "@shared/nutrition";
 import type { CalibrationReport } from "@shared/calibrationReport";
 import type { ConnectorPreferences, FeaturePreferences } from "@shared/preferences";
+
+export type CompletionStatus = "completed" | "partial" | "skipped";
+
+export interface SessionCompletion {
+  key: string;
+  date: string;
+  kind: SessionKind;
+  status: CompletionStatus;
+  rpe: number | null;
+  note: string | null;
+  recordedAt: string;
+}
+
+export interface PlanDay {
+  date: string;
+  sessions: Array<PlannedSession & { completion: SessionCompletion | null }>;
+  dailyTss: number;
+  nutrition: MacroTarget;
+}
+
+export interface PlanWeek {
+  weekStart: string;
+  arbitrated: ArbitratedWeek;
+  days: PlanDay[];
+  totalMinutes: number;
+  totalTss: number;
+  note: string;
+  adherence: { prescribed: number; completed: number; partial: number; skipped: number; adherenceRate: number | null };
+}
 
 /** The server serves this client (see server/vite.ts), so /api is same-origin — no base URL, no proxy. */
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -42,6 +73,10 @@ export const api = {
     if (to) q.set("to", to);
     return request<ArbitratedPlan>(`/api/plan/arbitrate${q.toString() ? `?${q}` : ""}`);
   },
+
+  week: (date?: string) => request<PlanWeek>(`/api/plan/week${date ? `?date=${date}` : ""}`),
+  completeSession: (body: { date: string; kind: SessionKind; status: CompletionStatus; rpe?: number; note?: string; prescribed?: PlannedSession }) =>
+    request<SessionCompletion>("/api/sessions/complete", { method: "POST", body: JSON.stringify(body) }),
 
   chatHistory: () => request<Array<{ role: "user" | "assistant"; content: string; createdAt: string }>>("/api/onboarding/history"),
   chat: (message: string) => request<{ reply: string; toolResults: string[] }>("/api/onboarding/chat", { method: "POST", body: JSON.stringify({ message }) }),

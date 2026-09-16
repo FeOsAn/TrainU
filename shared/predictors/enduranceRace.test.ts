@@ -18,6 +18,23 @@ test("predictRunRace falls back to threshold pace when the PB is only a seed but
   assert.equal(p.anchor, "threshold_pace");
 });
 
+test("runThresholdSecPerKm is read as a FRESH KILOMETRE, not as threshold pace", () => {
+  // The bug this pins: calibration.ts writes an all-out 1 km time trial into
+  // this field, but the predictor anchored it straight onto 15 km — treating
+  // a 3-4 minute effort as an hour-long one. It called a 3:00 marathon for a
+  // 4:00/km kilometre. Converting first lands at ~3:30, which is also where
+  // Riegel straight off the kilometre lands independently.
+  const a = { ...DEFAULT_ATHLETE, marathonPbMinutes: seeded(203), runThresholdSecPerKm: measured(240, "1 km time trial") };
+  const p = predictRunRace(a, 42.195);
+  assert.equal(p.anchor, "threshold_pace");
+  assert.ok(p.predictedTimeMinutes > 200, `a 4:00/km kilometre should not imply a sub-3:20 marathon, got ${p.predictedTimeFormatted}`);
+  assert.ok(p.predictedTimeMinutes < 225, `...nor a 3:45+ one, got ${p.predictedTimeFormatted}`);
+
+  // And it must agree with the independent cross-check within a few minutes.
+  const riegelFromKm = (240 / 60) * Math.pow(42.195, 1.06);
+  assert.ok(Math.abs(p.predictedTimeMinutes - riegelFromKm) < 8, `predicted ${p.predictedTimeMinutes} vs cross-check ${riegelFromKm}`);
+});
+
 test("a longer race predicts a slower pace than a shorter one off the same anchor (Riegel)", () => {
   const a = { ...DEFAULT_ATHLETE, marathonPbMinutes: measured(200, "PB") };
   const p10k = predictRunRace(a, 10);

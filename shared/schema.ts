@@ -65,6 +65,35 @@ export const trainingSessions = sqliteTable("training_sessions", {
   externalId: text("external_id"),
 });
 
+/**
+ * Prescription → adherence. The other half of the moat dataset: outcomeLog
+ * records what the app PREDICTED and what happened; this records what it
+ * PRESCRIBED and whether it got done. Predictions resolve a few times a year;
+ * this resolves several times a week, which is where the signal actually
+ * accumulates.
+ *
+ * Keyed by `${date}#${kind}` (see shared/prescription/sessionKinds.ts) because
+ * the plan is derived deterministically and never stored — there's no row id
+ * to point at. `prescribedJson` snapshots what was on the card at tick-off
+ * time on purpose: the plan re-derives from the athlete's current numbers, so
+ * without the snapshot, improving your threshold pace would silently rewrite
+ * what last month's sessions "were" and the adherence record would become a
+ * record of something that never happened.
+ */
+export const sessionCompletions = sqliteTable("session_completions", {
+  key: text("key").primaryKey(),
+  date: text("date").notNull(),
+  kind: text("kind").notNull(),
+  /** "completed" | "partial" | "skipped" */
+  status: text("status").notNull(),
+  prescribedJson: text("prescribed_json"),
+  rpe: integer("rpe"),
+  note: text("note"),
+  /** The logged/synced trainingSessions row this was satisfied by, when one matches. */
+  sessionId: text("session_id"),
+  recordedAt: text("recorded_at").notNull(),
+});
+
 /** The onboarding chat's transcript — single-athlete app, so one linear history rather than a per-conversation table. */
 export const chatMessages = sqliteTable("chat_messages", {
   id: text("id").primaryKey(),

@@ -8,7 +8,7 @@
  * the band now, not just FTP.
  */
 
-import type { AthleteParams } from "../athlete";
+import { FRESH_KM_TO_THRESHOLD, type AthleteParams } from "../athlete";
 import { type Confidence, type Measured, assessConfidence, widenForConfidence } from "../measured";
 
 function formatTime(totalMinutes: number): string {
@@ -48,6 +48,17 @@ const MARATHON_KM = 42.195;
 /** A trained runner's threshold pace sits close to their 15 km race pace. */
 const THRESHOLD_ANCHOR_KM = 15;
 
+/**
+ * runThresholdSecPerKm holds the FRESH KILOMETRE, not threshold pace — see
+ * shared/athlete.ts. Anchoring the stored number straight onto 15 km, as this
+ * used to, treated a 3-4 minute effort as an hour-long one and predicted a
+ * 3:00 marathon off a 4:00/km kilometre. Converting first lands at 3:30,
+ * which is also where Riegel straight off the kilometre lands independently.
+ */
+function thresholdPaceFrom(freshKmSecPerKm: number): number {
+  return freshKmSecPerKm * FRESH_KM_TO_THRESHOLD;
+}
+
 export function predictRunRace(a: AthleteParams, distanceKm: number, goalMinutes?: number, calibrationMultiplier = 1): RunRacePrediction {
   const pb = a.marathonPbMinutes;
   const threshold = a.runThresholdSecPerKm;
@@ -58,7 +69,7 @@ export function predictRunRace(a: AthleteParams, distanceKm: number, goalMinutes
   const useMarathonPb = pb.verified || !threshold.verified;
   const anchor: RunRacePrediction["anchor"] = useMarathonPb ? "marathon_pb" : "threshold_pace";
   const anchorDistanceKm = useMarathonPb ? MARATHON_KM : THRESHOLD_ANCHOR_KM;
-  const anchorTimeMinutes = useMarathonPb ? pb.value : (threshold.value * THRESHOLD_ANCHOR_KM) / 60;
+  const anchorTimeMinutes = useMarathonPb ? pb.value : (thresholdPaceFrom(threshold.value) * THRESHOLD_ANCHOR_KM) / 60;
 
   const predictedTimeMinutes = anchorTimeMinutes * Math.pow(distanceKm / anchorDistanceKm, RIEGEL_EXPONENT);
   const predictedPaceSecPerKm = Math.round((predictedTimeMinutes * 60) / distanceKm);

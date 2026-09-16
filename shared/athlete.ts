@@ -10,11 +10,30 @@
 
 import { type Measured, seeded, valueOf } from "./measured";
 
+/**
+ * Threshold pace as a multiple of the fresh kilometre. Lives here, next to
+ * the field it converts, because two modules deriving their own version of
+ * "what this number means" is exactly how the predictor and the plan engine
+ * ended up disagreeing about the same athlete.
+ */
+export const FRESH_KM_TO_THRESHOLD = 1.17;
+/** VO2 intervals are run at about the fresh kilometre itself. */
+export const FRESH_KM_TO_INTERVAL = 1.02;
+
 export interface AthleteParams {
   ftpWatts: Measured<number>;
   /** Bike aero drag area (m²). 0.32 = relaxed road position; a real TT setup is ~0.24-0.28. */
   bikeCdA: Measured<number>;
   cssSecPer100m: Measured<number>;
+  /**
+   * The athlete's FRESH KILOMETRE — an all-out 1 km time trial, which is what
+   * calibration.ts measures into this field. It is NOT threshold pace: an
+   * all-out kilometre is a three-to-four-minute effort, threshold is what
+   * holds for about an hour, and for a trained runner the two sit ~17% apart
+   * (FRESH_KM_TO_THRESHOLD below). Anything deriving a threshold or race pace
+   * from this MUST convert first — reading it as threshold pace directly once
+   * had the race predictor calling a 3:00 marathon for a 4:00/km kilometre.
+   */
   runThresholdSecPerKm: Measured<number>;
   runEasySecPerKm: Measured<number>;
   run5kSecPerKm: Measured<number>;

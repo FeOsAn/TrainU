@@ -177,6 +177,86 @@ causes a support conversation.
   predictions accumulate real outcomes over months. That accumulation, not
   this session, is what actually makes it a moat.
   111 tests, `tsc` clean.
+- **Phase 7 (done)** — until now the arbitration engine's output was a
+  *coefficient*: "0.83x load, deficit". True, defensible, and useless to an
+  athlete on a Tuesday morning. This phase puts real sessions, real numbers
+  and a real feedback channel underneath it.
+  - `shared/prescription/` turns the weekly multiplier into actual sessions.
+    `sessionKinds.ts` is the shared vocabulary (a runtime `SESSION_KINDS`
+    value, not just a type — HyroxNga learned that hand-written copies of the
+    same list drift apart). `templates.ts` holds the coaching IP as
+    deterministic data: `GOAL_QUALITIES` per goal type ordered
+    most-important-first, so when days are scarce the week drops from the
+    right rather than losing its long run. `PHASE_SHAPES` only reshape a week
+    (its intensity ceiling) and deliberately do NOT set its size — the
+    arbitrated multiplier already encodes phase, and two mechanisms sizing
+    the same week is how you get a 225-minute "easy run". `prescribe.ts` is
+    the multi-goal allocator: each goal's qualities are charged
+    `(index + 1) / weight` where `weight = 1/priority`, which deterministically
+    interleaves competing goals by priority; sessions merge ACROSS goals (two
+    goals both wanting an easy run get one session serving both, labelled as
+    such) but never within a goal. Planned TSS runs through the same
+    `estimateSessionTss` a logged session does, so prescribed and actual load
+    are comparable rather than two scales.
+  - `shared/nutrition.ts` puts numbers behind the stance. The deficit is
+    derived from the `requiredWeeklyChangeKg` `predictBodyComposition` already
+    computes (`GoalPhase` now carries it) — not a second, disagreeing copy of
+    the safe-rate logic. Katch-McArdle RMR off fat-free mass, training energy
+    from the day's prescribed TSS, deficit capped at 25% of maintenance,
+    protein 2.4 g/kg FFM in a deficit and 1.8 otherwise. Per-day, so a rest
+    day and a long-run day carry different targets.
+  - `shared/schema.ts`'s `sessionCompletions` + `server/completionsService.ts`
+    close the other loop. Keyed `date#kind`, storing a `prescribedJson`
+    snapshot: the plan re-derives on every request, so without the snapshot,
+    improving your threshold pace in March would silently rewrite what
+    February's sessions "were". This is the dataset that actually compounds —
+    `outcomeLog` gets a handful of predictions a year, adherence gets ~5 rows
+    a week per athlete.
+  - `GET /api/plan/week` returns the arbitrated week, 7 days of sessions,
+    per-day nutrition, completions and adherence in one call;
+    `POST /api/sessions/complete` and `GET /api/completions` record and read.
+    `Plan.tsx` now leads with tick-off session cards.
+
+  **Six bugs found by inspecting the generated weeks rather than by the tests
+  passing** — worth recording because every one of them produced plausible
+  output:
+  1. A merge collapsed a goal's *second* easy run into its first, quietly
+     giving 4 sessions where 5 were asked for. Merging is only legitimate
+     across goals.
+  2. A 225-minute "easy run" — two mechanisms (a `longShare` fraction and a
+     per-kind budget) were sizing the same session. Removed one, added
+     `KIND_MINUTES` bounds.
+  3. A long run *shorter* than the week's easy run. Now explicitly forced to
+     dominate.
+  4. A 3h13 long run: the budget was `daysPerWeek * 60` but 3 of those 5 days
+     were strength sessions that don't draw on it. Sized by aerobic slot count
+     instead.
+  5. A base week with two threshold runs — the intensity ceiling downgraded
+     `run_intervals` into a `run_threshold` that already existed. Duplicated
+     hard kinds now downgrade again. Base reads 3 easy + 1 threshold + 1 long;
+     build correctly keeps both threshold and intervals.
+  6. **A pre-existing cross-module bug the prescription work exposed**:
+     `calibration.ts` writes an all-out 1 km time trial into
+     `runThresholdSecPerKm`, but `enduranceRace.ts` anchored that number
+     straight onto 15 km — reading a three-minute effort as an hour-long one.
+     It predicted a **3:00 marathon off a 4:00/km kilometre**. The conversion
+     now lives once in `shared/athlete.ts` (`FRESH_KM_TO_THRESHOLD`), next to
+     the field it converts, with the field's doc comment saying what it holds;
+     the fixed predictor gives 3:30, and Riegel straight off the kilometre
+     independently agrees at 3:31. The general lesson, the same one
+     `Measured<T>` encodes: a number crossing a module boundary needs its
+     meaning attached, not assumed.
+
+  151 tests, `tsc` clean. **Verified live**: full API sweep against a fresh
+  DB; an edge-case battery (bad date/kind/status/rpe, empty bodies, garbage
+  query params) returning clean 400s with no 500s and no hangs; `daysPerWeek`
+  clamping 99 → 7; empty-state and all-goals-past weeks degrading to sane
+  maintenance numbers. Then in a real browser: five tick-off cards, ticking
+  one persists through a reload, adherence updates, and the week renders real
+  paces ("5:30/km — conversational, nose-breathing"), real loads ("Back squat
+  4 × 5 @ 112.5 kg"), per-day macros (2460 kcal on a rest day → 3231 on the
+  long-run day) and the shared-session note "Serves Wedding and Ironman 70.3
+  at once — one session, both goals" — zero console, page or HTTP errors.
 
 ## Client
 
@@ -185,9 +265,13 @@ Everything above was API-only until the client was built — five routes under
 (same-origin, since the Express server serves the Vite middleware):
 
 - **Plan** (`/`) — the hero, because the arbitration engine is the product.
-  This week's nutrition stance and blended load multiplier, what each goal
-  wants in isolation, the tradeoffs being made where goals genuinely pull
-  apart, then the weeks ahead.
+  Since Phase 7 it opens on this week's actual sessions, day by day, each with
+  its concrete targets, its per-day kcal/protein/fat/carb, and Done/Partial/
+  Skipped buttons — then the blended load multiplier and nutrition stance with
+  adherence, then "why this week looks like this" (what each goal wants in
+  isolation), the tradeoffs where goals genuinely pull apart, and the weeks
+  ahead. The reasoning is still there; it's just no longer the first thing the
+  athlete has to read to know what to do today.
 - **Athlete** (`/athlete`) — every `Measured<T>` with a seed/measured pill and
   its provenance string underneath, plus a live count of how many numbers are
   still guesses. This is the one hard rule made visible to the athlete rather
@@ -220,6 +304,13 @@ Garmin/Whoop account or import a real Apple Health export (Phase 5's actual
 first test), have the onboarding chat handle a real multi-turn conversation
 with an `ANTHROPIC_API_KEY` set (Phase 4's actual first test), and start
 logging real outcomes so Phase 6's calibration has something to say.
+
+Phase 7 makes that last one materially easier: adherence rows arrive weekly
+rather than a few times a year, and they carry both what was prescribed and
+what actually happened. The obvious next build is to feed them back — when an
+athlete systematically skips the second threshold session, the prescriber
+should learn that about *them*, not just report it. That closes the same loop
+Phase 6 opened for predictions, one level down at the session.
 
 ## Running it
 
