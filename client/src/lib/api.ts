@@ -1,15 +1,45 @@
 import type { AthleteParams } from "@shared/athlete";
-import type { Goal, GoalType } from "@shared/goal";
+import type { Goal, GoalType, Discipline } from "@shared/goal";
 import type { TrainingSession } from "@shared/session";
 import type { TrainingLoadSummary } from "@shared/trainingLoad";
-import type { ArbitratedPlan, ArbitratedWeek } from "@shared/arbitration/arbitrate";
+import type { ArbitratedPlan } from "@shared/arbitration/arbitrate";
 import type { PlannedSession, SessionKind } from "@shared/prescription/sessionKinds";
-import type { MacroTarget } from "@shared/nutrition";
 import type { CalibrationReport } from "@shared/calibrationReport";
-export type { AssembledApp };
 import type { ConnectorPreferences, FeaturePreferences } from "@shared/preferences";
 import type { AssembledApp } from "@shared/appShell/assemble";
-import type { Discipline } from "@shared/goal";
+
+/*
+ * The types the pages render come from the modules that DECLARE them —
+ * re-exported here so a page imports one thing, never re-typed here.
+ *
+ * Until Phase 10 this file carried a hand-copied `CompletionStatus` union and
+ * a hand-copied `SessionCompletion` interface. That is precisely the drift
+ * `shared/prescription/completion.ts` exists to end: the copy could not know
+ * about `reason`, so a status the server accepted was a status the client
+ * could not name. One declaration, imported by both halves.
+ */
+export type {
+  CompletionStatus,
+  CompletionReason,
+  CompletionFeedback,
+  CompletionFollowUp,
+} from "@shared/prescription/completion";
+export type { Condition, ConditionKind, Severity, Restriction, BodyPart, GoalRisk } from "@shared/conditions";
+export type { CheckIn, Readiness, ReadinessBand } from "@shared/readiness";
+export type { Adjustment, AdjustedSession } from "@shared/prescription/adjust";
+export type { PhysiqueEntry, PhysiqueEntryInput, MetricTrend, PhysiqueMetric, PhysiqueProgress } from "@shared/physique";
+export type { PacingResult, PacingPlan, PacingUnavailable } from "@shared/pacing/pacing";
+export type { GoalPatch, WhatIfResult } from "@shared/arbitration/whatIf";
+export type { AssembledApp };
+
+import type { CompletionStatus, CompletionReason, CompletionFeedback, CompletionFollowUp } from "@shared/prescription/completion";
+import type { Condition, ConditionInput, ConditionPatch } from "@shared/conditions";
+import type { PhysiqueEntry, PhysiqueEntryInput, MetricTrend, PhysiqueMetric, PhysiqueProgress } from "@shared/physique";
+import type { PacingResult } from "@shared/pacing/pacing";
+import type { GoalPatch, WhatIfResult } from "@shared/arbitration/whatIf";
+import type { BenchmarkView, BenchmarkPatch } from "../../../server/benchmarksService";
+import type { CheckInRecord } from "../../../server/checkInsService";
+import type { WeekView, WeekSession } from "../../../server/weekService";
 
 export interface BlockChoiceRow {
   id: string;
@@ -22,34 +52,11 @@ export interface BlockChoiceRow {
   overridden: boolean;
 }
 
-export type CompletionStatus = "completed" | "partial" | "skipped";
-
-export interface SessionCompletion {
-  key: string;
-  date: string;
-  kind: SessionKind;
-  status: CompletionStatus;
-  rpe: number | null;
-  note: string | null;
-  recordedAt: string;
-}
-
-export interface PlanDay {
-  date: string;
-  sessions: Array<PlannedSession & { completion: SessionCompletion | null }>;
-  dailyTss: number;
-  nutrition: MacroTarget;
-}
-
-export interface PlanWeek {
-  weekStart: string;
-  arbitrated: ArbitratedWeek;
-  days: PlanDay[];
-  totalMinutes: number;
-  totalTss: number;
-  note: string;
-  adherence: { prescribed: number; completed: number; partial: number; skipped: number; adherenceRate: number | null };
-}
+/** The week as `GET /api/plan/week` returns it — the server's own type, not a second copy of it. */
+export type PlanWeek = WeekView;
+export type PlanDay = WeekView["days"][number];
+export type PlanSession = WeekSession;
+export type { BenchmarkView, BenchmarkPatch, CheckInRecord };
 
 /** The server serves this client (see server/vite.ts), so /api is same-origin — no base URL, no proxy. */
 /** Thrown on a 401 so the shell can show the login screen instead of an error per panel. */
@@ -69,6 +76,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+function query(params: Record<string, string | number | undefined>): string {
+  const q = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== "") q.set(key, String(value));
+  return q.toString() ? `?${q}` : "";
+}
+
 export const api = {
   goals: () => request<Goal[]>("/api/goals"),
   createGoal: (goal: {
@@ -84,19 +97,83 @@ export const api = {
   athlete: () => request<AthleteParams>("/api/athlete"),
   patchAthlete: (fields: Record<string, number>) => request<AthleteParams>("/api/athlete", { method: "PATCH", body: JSON.stringify(fields) }),
 
+  /** Eight HYROX stations in race order, then the roxzone. Each row carries its own bounds, hint and provenance. */
+  benchmarks: () => request<BenchmarkView[]>("/api/athlete/benchmarks"),
+  patchBenchmarks: (patch: BenchmarkPatch) =>
+    request<BenchmarkView[]>("/api/athlete/benchmarks", { method: "PATCH", body: JSON.stringify(patch) }),
+
   sessions: () => request<TrainingSession[]>("/api/sessions"),
   trainingLoad: () => request<TrainingLoadSummary>("/api/training-load"),
 
-  plan: (from?: string, to?: string) => {
-    const q = new URLSearchParams();
-    if (from) q.set("from", from);
-    if (to) q.set("to", to);
-    return request<ArbitratedPlan>(`/api/plan/arbitrate${q.toString() ? `?${q}` : ""}`);
-  },
+  plan: (from?: string, to?: string) => request<ArbitratedPlan>(`/api/plan/arbitrate${query({ from, to })}`),
 
-  week: (date?: string) => request<PlanWeek>(`/api/plan/week${date ? `?date=${date}` : ""}`),
-  completeSession: (body: { date: string; kind: SessionKind; status: CompletionStatus; rpe?: number; note?: string; prescribed?: PlannedSession }) =>
-    request<SessionCompletion>("/api/sessions/complete", { method: "POST", body: JSON.stringify(body) }),
+  week: (date?: string, daysPerWeek?: number) => request<PlanWeek>(`/api/plan/week${query({ date, daysPerWeek })}`),
+
+  /*
+   * Send ONLY the field being changed. `recordCompletion` patches, so an
+   * absent `rpe` keeps the stored one and an explicit `null` clears it —
+   * which is what lets "Done", then "how hard was it", then "actually it was
+   * partial" be three taps rather than three complete re-submissions.
+   *
+   * `prescribed` goes on the FIRST tap: it snapshots what the session was, so
+   * improving your threshold pace in March cannot rewrite what February's
+   * sessions "were", and it is what prices `adherence.actualTss`.
+   */
+  completeSession: (body: {
+    date: string;
+    kind: SessionKind;
+    status: CompletionStatus;
+    rpe?: number | null;
+    reason?: CompletionReason | null;
+    note?: string | null;
+    prescribed?: PlannedSession | null;
+  }) => request<CompletionFeedback & { followUp: CompletionFollowUp | null }>("/api/sessions/complete", { method: "POST", body: JSON.stringify(body) }),
+
+  completions: (from?: string, to?: string) => request<CompletionFeedback[]>(`/api/completions${query({ from, to })}`),
+
+  // ─── Injuries & illness ───────────────────────────────────────────────
+  conditions: () => request<Condition[]>("/api/conditions"),
+  openCondition: (body: ConditionInput) => request<Condition>("/api/conditions", { method: "POST", body: JSON.stringify(body) }),
+  patchCondition: (id: string, patch: ConditionPatch) =>
+    request<Condition>(`/api/conditions/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  /** `closedAt: null` reopens — the app never closes a condition on its own, and an early tick needs a way back. */
+  closeCondition: (id: string, closedAt: string | null) =>
+    request<Condition>(`/api/conditions/${encodeURIComponent(id)}/close`, { method: "POST", body: JSON.stringify({ closedAt }) }),
+
+  // ─── Morning check-in ─────────────────────────────────────────────────
+  checkIn: (date: string) => request<CheckInRecord | null>(`/api/check-ins${query({ date })}`),
+  recordCheckIn: (body: {
+    date?: string;
+    sleepQuality: number;
+    soreness: number;
+    energy: number;
+    restingHrBpm?: number | null;
+    note?: string | null;
+    trainAnywayOverride?: boolean;
+  }) =>
+    request<{ checkIn: CheckInRecord; readiness: import("@shared/readiness").Readiness; adjustments: CheckInRecord["adjustments"] }>(
+      "/api/check-ins",
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  // ─── Physique ─────────────────────────────────────────────────────────
+  physique: (from?: string, to?: string) =>
+    request<{ entries: PhysiqueEntry[]; trend: Record<PhysiqueMetric, MetricTrend | null> }>(`/api/physique${query({ from, to })}`),
+  savePhysique: (body: PhysiqueEntryInput) =>
+    request<{ entry: PhysiqueEntry; warning: string | null }>("/api/physique", { method: "POST", body: JSON.stringify(body) }),
+  deletePhysique: (date: string) => request<PhysiqueEntry>(`/api/physique/${date}`, { method: "DELETE" }),
+  physiqueProgress: (goalId: string) => request<PhysiqueProgress>(`/api/physique/progress${query({ goalId })}`),
+
+  // ─── Race-day pacing ──────────────────────────────────────────────────
+  // Read-only by construction: opening a pacing plan is not a prediction, so
+  // nothing is written and no outcome_log row is created by looking at it.
+  pacing: () => request<PacingResult[]>("/api/pacing"),
+  pacingFor: (goalId: string, options: { basis?: "target" | "predicted"; targetSeconds?: number } = {}) =>
+    request<PacingResult>(`/api/pacing/${encodeURIComponent(goalId)}${query({ basis: options.basis, targetSeconds: options.targetSeconds })}`),
+
+  // ─── What if I changed a goal? ────────────────────────────────────────
+  whatIf: (body: { patch: GoalPatch; fromDate?: string; toDate?: string }) =>
+    request<WhatIfResult>("/api/plan/what-if", { method: "POST", body: JSON.stringify(body) }),
 
   chatHistory: () => request<Array<{ role: "user" | "assistant"; content: string; createdAt: string }>>("/api/onboarding/history"),
   chat: (message: string) => request<{ reply: string; toolResults: string[] }>("/api/onboarding/chat", { method: "POST", body: JSON.stringify({ message }) }),
@@ -122,8 +199,12 @@ export function formatPace(secPerKm: number | null | undefined): string {
   return `${Math.floor(secPerKm / 60)}:${String(Math.round(secPerKm % 60)).padStart(2, "0")}/km`;
 }
 
+export function todayStr(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 export function daysUntil(dateStr: string): number {
-  return Math.ceil((Date.parse(`${dateStr}T00:00:00Z`) - Date.parse(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`)) / 86_400_000);
+  return Math.ceil((Date.parse(`${dateStr}T00:00:00Z`) - Date.parse(`${todayStr()}T00:00:00Z`)) / 86_400_000);
 }
 
 export const GOAL_TYPE_LABELS: Record<GoalType, string> = {

@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, daysUntil, GOAL_TYPE_LABELS } from "../lib/api";
+import { api, daysUntil, GOAL_TYPE_LABELS, todayStr } from "../lib/api";
+import { useSurfaceBlocks } from "../lib/appShell";
+import { WhatIfPanel } from "../components/WhatIfPanel";
 import { type Discipline, type GoalType, defaultDiscipline } from "@shared/goal";
 
 const TYPES = Object.keys(GOAL_TYPE_LABELS) as GoalType[];
@@ -42,6 +44,9 @@ function metricFieldsFor(type: GoalType): Array<{ key: string; label: string; pl
 export default function Goals() {
   const queryClient = useQueryClient();
   const { data: goals, isLoading } = useQuery({ queryKey: ["goals"], queryFn: api.goals });
+  const goalBlocks = useSurfaceBlocks("goals");
+  const canWhatIf = goalBlocks === undefined || goalBlocks.includes("goals.whatIf");
+  const [tryingOut, setTryingOut] = useState<string | null>(null);
 
   const [type, setType] = useState<GoalType>("endurance_race");
   const [discipline, setDiscipline] = useState<Discipline>("run");
@@ -104,6 +109,20 @@ export default function Goals() {
               <span>{goal.targetDate}</span>
               <span className={`pill ${goal.priority === 1 ? "pill-verified" : "pill-neutral"}`}>priority {goal.priority}</span>
             </div>
+
+            {/* Only for a goal that is still ahead of you — there is nothing to try out about a race that has happened. */}
+            {canWhatIf && goal.active && goal.targetDate >= todayStr() && (
+              <>
+                <button
+                  className="btn-ghost"
+                  style={{ marginTop: 12, padding: "6px 12px", fontSize: 12 }}
+                  onClick={() => setTryingOut(tryingOut === goal.id ? null : goal.id)}
+                >
+                  {tryingOut === goal.id ? "Close" : "What if…"}
+                </button>
+                {tryingOut === goal.id && <WhatIfPanel goal={goal} />}
+              </>
+            )}
           </div>
         );
       })}

@@ -421,6 +421,107 @@ causes a support conversation.
   choice, array body) returns 400 — zero console, page or HTTP errors.
 
 
+- **Phase 10 (done)** — the plan starts reacting to the athlete, and the two
+  features that would have reacted *wrongly* are deliberately not built.
+
+  Ten features were designed in parallel, reconciled into one architecture, and
+  then attacked by three adversarial reviews (coaching validity, architecture
+  and drift, athlete experience). Those reviews returned **9 blockers and 25
+  majors**, and several were serious enough that shipping the design as written
+  would have been worse than shipping nothing. The rulings are recorded as
+  binding decisions; the four that mattered most:
+  - **A threshold run prescribed to an ill athlete.** `applyCeiling(kind,
+    "easy")` walks `DOWNGRADE` exactly ONE step, so `run_intervals` became
+    `run_threshold` — `3 × 10 min` at threshold pace for someone with a fever.
+    `downgradeToEasy()` is a fixed-point walk and is now used everywhere an
+    easy ceiling is meant; `applyCeiling`'s easy branch delegates to it so the
+    two cannot disagree. Pinned by a test asserting no session emitted while
+    any illness is open has `intensity === "hard"`.
+  - **Sessions silently shrinking 15–50%.** The conditions modulator was
+    scheduled twice as an "idempotent guard", but its scaling branches are
+    multiplicative (0.85 × 0.85 = 0.72) — and because the session is rebuilt
+    from the new minutes, the card reads as a coherent, deliberate
+    prescription. Split into `applyConditions` (the full rules, once) and
+    `enforceConditions` (only the two predicates on the current kind, which
+    are genuinely idempotent, last). Pinned by a test that runs the pipeline
+    over its own output and asserts zero new adjustments — **plus a companion
+    test proving a scaling step does compound**, which is what makes the first
+    test meaningful rather than accidentally green.
+  - **Taper weeks losing their intensity.** Two slices removed hard sessions
+    with no phase gate, in exactly the week `PHASE_SHAPES.taper` says
+    "intensity held". The design's guard read `loadMultiplier <= 0.6`, which
+    the multi-goal blend this app exists to perform defeats: an Ironman taper
+    (0.5, priority 1) with a cut (0.9, priority 2) blends to 0.633. So
+    `PrescribedWeek` now carries `phaseName` and the gate reads it. In
+    taper/peak a low morning **shortens** the hard session rather than
+    downgrading it — which is what a coach does, and race week is exactly when
+    self-reported readiness is systematically worst.
+  - **A deficit running through an injury.** The conditions slice strips
+    training TSS out of the day, which lowers maintenance energy, and a 25%
+    deficit was then applied to that already-reduced number — a double hit
+    precisely when tissue repair needs substrate. While a condition of
+    severity ≥ 2 is open the stance is forced to `maintenance`, explained in
+    the same channel a goal-vs-goal tradeoff uses.
+
+  **Built**: `shared/prescription/adjust.ts` (the one modulation layer) and its
+  two slices; session feedback (RPE + a structured reason whose *signal* —
+  circumstance / recovery / health / engagement — is DATA, so "travelling" and
+  "knees hurt" can never be read the same way); injury and illness as
+  first-class state; morning check-in; race-day pacing; what-if on goals;
+  per-occurrence session sizing; HYROX station entry; physique tracking.
+
+  **Deliberately NOT built, and declared as honest gaps**: adherence
+  tendencies (`plan.learned`) and mid-week re-plan (`plan.adjustments`).
+  Every tendency rule has a minimum-evidence threshold, so on a fresh database
+  all of them return nothing — shipping logic whose first real action is two
+  months away, that has never run against real data, is what Phase 6's own
+  caveat warns against. Both data-corruption blockers also live there: their
+  evidence table records "shown and never answered", and the app's own
+  adjustments manufacture phantom skips in it (a session *the app removed*
+  counted as one the athlete skipped — the Phase 3 archetype). The reviews
+  also found the learning loop only ever subtracts: four rules remove load,
+  none restore it. Session feedback, which *collects* what both need, ships
+  now; the learners get built when there is real signal to build against.
+
+  **A real bug found by verifying rather than trusting a report.** The healing
+  rule was implemented correctly but anchored on the week's Monday, so an
+  injury opened on a Wednesday left the stance reading `deficit` in the very
+  response that already carried two sessions the same injury had turned into
+  rest. A week is seven days long; whether a condition is open during it cannot
+  be answered from its first day. `asOf` now clamps today into the week — the
+  current week asks about today, a past week asks about its own last day (so
+  news that arrived afterwards never rewrites what it said), and a future week
+  asks about its first. Four cases pinned by a regression test.
+
+  **Two rules that look like details and are not:**
+  - *Nutrition targets follow the plan, not the performance.* A day's macros
+    come from the adjusted week, never from completions. Skipping a long run
+    must not retroactively drop that day from 3231 to 2460 kcal: the athlete
+    ate to the number the app gave them, and silently replacing it implies
+    they overate. Verified live — skip a session, the target does not move.
+  - *"Actually, I did this" must always work.* A session the layer turned into
+    rest stays recordable from the Changes panel. Without it, an athlete who
+    trains anyway either loses the record or has to go back and falsify their
+    check-in — making lying to the app the only route to training as
+    prescribed. Verified live: a rested long run, ticked anyway, returns to
+    its day card and is immune on the next re-derive while the injury is still
+    open.
+
+  568 tests, `tsc` clean, production build green. **Verified live**: B5 and B6
+  end to end against a real server; an edge-case battery (bad severities,
+  unknown restrictions and stations, RPE on a skipped session, absurd weights,
+  unknown goal ids, garbage patches, empty bodies) returning clean 400s and
+  404s with **zero 5xx**. Then in a browser at 430×900 phone width: zero
+  console errors, zero page errors, zero failed calls, and **zero enum, kind or
+  block ids on screen** — the athlete reads "Can't run", never `no_running`.
+
+  **Known limitations, stated rather than discovered later**: physique photos
+  are not built (an authenticated file-serving path on a volume is its own
+  piece of work — measurements and the trend are there); the Plan page does not
+  gate on its four original blocks, which predates this phase; and the check-in
+  uses the server's UTC date, so an athlete far from UTC checking in early can
+  have the app's "today" disagree with theirs.
+
 ## Client
 
 Everything above was API-only until the client was built — five routes under
@@ -462,11 +563,19 @@ rendered on screen.
 
 ## What's next
 
-Real usage, which needs things this environment can't provide: connect a real
-Garmin/Whoop account or import a real Apple Health export (Phase 5's actual
-first test), have the onboarding chat handle a real multi-turn conversation
-with an `ANTHROPIC_API_KEY` set (Phase 4's actual first test), and start
-logging real outcomes so Phase 6's calibration has something to say.
+**Deploy it and use it.** Everything below needs things this environment
+cannot provide, and each is the first real test of a phase that has only ever
+been verified synthetically: connect a real Garmin/Whoop account or import an
+Apple Health export (Phase 5), have the onboarding chat hold a real multi-turn
+conversation with an `ANTHROPIC_API_KEY` set (Phase 4), and start logging real
+outcomes so Phase 6's calibration has something to say.
+
+Phase 10 adds a fourth, and it is the one that compounds: **tick sessions off
+every week.** The two deferred features — learning what you actually do, and
+rearranging the week when you miss a day — are declared gaps precisely because
+they need that history before any rule of theirs can fire. Four to eight weeks
+of real completions, with real reasons attached, is what turns them from
+plausible logic into logic anyone can check.
 
 The block library is the other thing that compounds: every gap
 `capabilityGaps` records is a block that, once built, serves every future

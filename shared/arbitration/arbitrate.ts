@@ -15,6 +15,7 @@
 import type { Goal, GoalConflict } from "../goal";
 import type { AthleteParams } from "../athlete";
 import { isOpenOn, type Condition } from "../conditions";
+import { addDays } from "../dates";
 import { phaseForGoal, type GoalPhase, type NutritionStance } from "./goalPhase";
 
 export interface ArbitratedWeek {
@@ -136,7 +137,20 @@ export function arbitrateWeek(
    * explanation channel a goal-vs-goal tradeoff uses, so "why am I not in a
    * deficit this week" has an answer on the screen.
    */
-  const asOf = date < today ? date : today;
+  /*
+   * The week is seven days long, so "is a condition open during this week"
+   * cannot be answered from its Monday alone. Anchoring on `date` meant an
+   * injury opened on Wednesday did not pause the cut on the very screen
+   * showing that Wednesday — the stance read `deficit` while the same
+   * response carried two sessions this injury had just turned into rest.
+   *
+   * Clamp now into the week instead: the current week asks about today, a
+   * past week asks about its own last day (so news that arrived afterwards
+   * never rewrites it), and a future week asks about its first (reporting
+   * what is true as things stand, not a guess about recovery).
+   */
+  const weekEnd = addDays(date, 6);
+  const asOf = today < date ? date : today > weekEnd ? weekEnd : today;
   const healing = conditions.filter((c) => c.severity >= HEALING_SEVERITY && isOpenOn(c, asOf));
   if (healing.length > 0 && nutritionStance !== "maintenance") {
     const pausedStance = nutritionStance;

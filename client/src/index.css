@@ -410,3 +410,110 @@ td {
   padding: 10px;
   border-bottom: 1px solid var(--hairline);
 }
+
+/* ─── Phase 10 ────────────────────────────────────────────────────────── */
+
+/*
+ * Chips. The check-in, RPE and skip-reason rows are all the same control:
+ * a horizontal strip of small toggles that fits on one line and expands
+ * nothing. DECISIONS C8 — the reasoning must not push the session cards
+ * down the page, so every Phase 10 control that lives above them is a chip
+ * row or a single line of text.
+ */
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+}
+
+.chip {
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--muted-strong);
+  background: var(--surface-2);
+  border: 1px solid var(--hairline-strong);
+  border-radius: 999px;
+  padding: 6px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.12s, background 0.12s, border-color 0.12s;
+}
+
+.chip:hover:not(:disabled) {
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.chip.chip-on {
+  background: var(--primary-dim);
+  border-color: rgba(36, 204, 107, 0.4);
+  color: var(--primary);
+}
+
+.chip.chip-warn {
+  background: rgba(224, 163, 58, 0.12);
+  border-color: rgba(224, 163, 58, 0.3);
+  color: var(--warn);
+}
+
+.chip:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.chip-mini {
+  padding: 4px 8px;
+  font-size: 10.5px;
+}
+
+/* A whole feature collapsed into one tappable line, per C8. */
+.line-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.line-toggle .muted {
+  font-size: 12px;
+}
+
+/* The prescription an adjustment replaced — shown, not hidden. */
+.was {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+.sparkline {
+  display: block;
+  width: 100%;
+  height: 44px;
+  overflow: visible;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.check-row input {
+  width: auto;
+  margin: 0;
+  accent-color: var(--primary);
+}

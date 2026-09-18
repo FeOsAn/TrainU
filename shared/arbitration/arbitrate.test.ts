@@ -239,3 +239,48 @@ test("a future week is arbitrated against what is known TODAY, not a guess about
   const nextMonth = arbitrateWeek(goals, "2026-10-19", athlete, open, "2026-09-21");
   assert.equal(nextMonth.nutritionStance, "maintenance", "the app cannot know the strain will have healed by then, and pretending it will is the guess-as-fact pattern");
 });
+
+test("an injury opened mid-week pauses the cut on that same week's screen", () => {
+  /*
+   * The bug this pins: the healing check anchored on the week's Monday, so a
+   * calf strain opened on Wednesday left the stance reading `deficit` in the
+   * very response that already carried two sessions the same injury had
+   * turned into rest. A week is seven days long; whether a condition is open
+   * during it cannot be answered from its first day alone.
+   */
+  const wedding: Goal = {
+    id: "wed", type: "body_composition", discipline: "other", label: "Wedding",
+    targetDate: "2026-11-15", priority: 2, successCriteria: "", targetMetrics: { targetBodyFatPercent: 12 },
+    constraints: [], createdAt: "2026-01-01T00:00:00.000Z", active: true,
+  };
+  const strain = (openedAt: string): Condition => ({
+    id: "c1", kind: "injury", label: "Left calf strain", bodyPart: "calf", severity: 2,
+    restrictions: ["no_running"], openedAt, closedAt: null, note: null,
+    createdAt: openedAt, updatedAt: openedAt,
+  });
+  const WEEK = "2026-09-14", TODAY = "2026-10-01";
+
+  assert.equal(arbitrateWeek([wedding], WEEK, DEFAULT_ATHLETE, [], TODAY).nutritionStance, "deficit");
+  assert.equal(
+    arbitrateWeek([wedding], WEEK, DEFAULT_ATHLETE, [strain("2026-09-16")], TODAY).nutritionStance,
+    "maintenance",
+    "an injury open on the Wednesday of this week must pause the cut for this week",
+  );
+  // ...and the mirror image, which is the reason the naive fix is wrong:
+  // news that arrived after a week was lived must never rewrite it.
+  assert.equal(
+    arbitrateWeek([wedding], WEEK, DEFAULT_ATHLETE, [strain("2026-09-28")], TODAY).nutritionStance,
+    "deficit",
+    "an injury opened after that week was over must not retroactively change what it said",
+  );
+  // A future week reports what is true as things stand, not a guess at recovery.
+  assert.equal(
+    arbitrateWeek([wedding], "2026-10-12", DEFAULT_ATHLETE, [strain("2026-09-16")], TODAY).nutritionStance,
+    "maintenance",
+  );
+  // A niggle is not healing.
+  assert.equal(
+    arbitrateWeek([wedding], WEEK, DEFAULT_ATHLETE, [{ ...strain("2026-09-16"), severity: 1 }], TODAY).nutritionStance,
+    "deficit",
+  );
+});

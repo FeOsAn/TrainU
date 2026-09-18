@@ -1,7 +1,10 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, formatPace } from "../lib/api";
 import { orderByBlocks, useSurfaceBlocks } from "../lib/appShell";
+import { BenchmarksPanel } from "../components/BenchmarksPanel";
+import { PhysiquePanel } from "../components/PhysiquePanel";
+import { ConditionHistory } from "../components/ConditionHistory";
 import type { AthleteParams } from "@shared/athlete";
 
 type ScalarKey = Exclude<keyof AthleteParams, "benchmarks">;
@@ -12,13 +15,30 @@ interface FieldSpec {
   format?: (n: number) => string;
 }
 
+/**
+ * A group is either a list of `Measured<T>` scalars or a panel of its own.
+ * Both are BLOCKS and both go through `orderByBlocks`, so the assembler
+ * places station benchmarks, weigh-ins and injury history exactly the way it
+ * already places the running and strength numbers — one matching rule, not a
+ * second one bolted on for the Phase 10 panels.
+ */
+interface Group {
+  blockId: string;
+  title: string;
+  /** Scalars from `AthleteParams`; counted by the seed counter. */
+  fields?: FieldSpec[];
+  /** A panel that carries its own provenance and its own writes. */
+  render?: () => ReactNode;
+  blurb?: string;
+}
+
 /*
  * Each group is a BLOCK — see shared/appShell/blocks.ts. The assembler
  * decides which of these an athlete sees, so a body-composition athlete isn't
  * asked to care about CdA and critical swim speed, and a marathoner isn't
  * either. The ids here have to match the catalog's.
  */
-const GROUPS: Array<{ blockId: string; title: string; fields: FieldSpec[] }> = [
+const GROUPS: Group[] = [
   {
     blockId: "athlete.running",
     title: "Running",
@@ -66,6 +86,23 @@ const GROUPS: Array<{ blockId: string; title: string; fields: FieldSpec[] }> = [
       { key: "ohp1RmKg", label: "OHP 1RM", format: (n) => `${n} kg` },
       { key: "strengthEnduranceIndex", label: "Strength-endurance index", format: (n) => `${n}` },
     ],
+  },
+  {
+    blockId: "athlete.stations",
+    title: "HYROX stations",
+    blurb: "Time each one fresh. The predictor applies its own in-race fade on top, so these are gym numbers, not race numbers.",
+    render: () => <BenchmarksPanel />,
+  },
+  {
+    blockId: "athlete.physique",
+    title: "Physique progress",
+    blurb: "The trend, not one morning's number. The newest weigh-in is what the plan reads, so deleting or back-dating one just works.",
+    render: () => <PhysiquePanel />,
+  },
+  {
+    blockId: "athlete.conditions",
+    title: "Injuries & illness",
+    render: () => <ConditionHistory />,
   },
 ];
 
@@ -146,7 +183,7 @@ export default function Athlete() {
   // app has decided not to show them, sends them looking for measurements
   // nothing is going to ask for.
   const seedCount = athlete
-    ? groups.flatMap((group) => group.fields).filter((spec) => !athlete[spec.key].verified).length
+    ? groups.flatMap((group) => group.fields ?? []).filter((spec) => !athlete[spec.key].verified).length
     : 0;
 
   return (
@@ -176,12 +213,14 @@ export default function Athlete() {
       {athlete &&
         groups.map((group) => (
           <div key={group.blockId} className="panel">
-            <div className="section-label" style={{ marginBottom: 10 }}>
+            <div className="section-label" style={{ marginBottom: group.blurb ? 6 : 10 }}>
               {group.title}
             </div>
-            {group.fields.map((spec) => (
+            {group.blurb && <p className="tiny muted" style={{ marginTop: 0, marginBottom: 12, lineHeight: 1.5 }}>{group.blurb}</p>}
+            {group.fields?.map((spec) => (
               <Field key={spec.key} spec={spec} athlete={athlete} onSave={(key, value) => save.mutate({ [key]: value })} />
             ))}
+            {group.render?.()}
           </div>
         ))}
     </div>
