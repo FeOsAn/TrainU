@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { DEFAULT_ATHLETE } from "../athlete";
 import { measured } from "../measured";
 import type { Goal } from "../goal";
+import type { Condition } from "../conditions";
 import { arbitratePlan, arbitrateWeek } from "./arbitrate";
 
 function goal(over: Partial<Goal>): Goal {
@@ -142,4 +143,99 @@ test("arbitratePlan merges the same conflict across contiguous weeks into one wi
   const pairConflicts = plan.conflicts.filter((c) => c.betweenGoalIds.includes("race") && c.betweenGoalIds.includes("cut"));
   assert.ok(pairConflicts.length >= 1, "expected at least one merged conflict window for this goal pair");
   assert.ok(pairConflicts.length < plan.weeks.length, "weekly conflicts for the same pair must be merged, not repeated once per week");
+});
+
+// ─── Conditions ──────────────────────────────────────────────────────────────
+
+function condition(over: Partial<Condition> = {}): Condition {
+  return {
+    id: "c",
+    kind: "injury",
+    label: "Left calf strain",
+    bodyPart: "calf",
+    severity: 2,
+    restrictions: ["no_running"],
+    openedAt: "2026-09-10",
+    closedAt: null,
+    note: null,
+    createdAt: "2026-09-10T08:00:00.000Z",
+    updatedAt: "2026-09-10T08:00:00.000Z",
+    ...over,
+  };
+}
+
+function cutAthlete() {
+  return { ...DEFAULT_ATHLETE, weightKg: measured(82, "scale") };
+}
+
+test("with no conditions the arbitrated week is byte-identical to what it always was", () => {
+  const athlete = cutAthlete();
+  const goals = [
+    goal({ id: "race", type: "endurance_race", label: "Ironman", targetDate: "2027-06-13", priority: 2 }),
+    goal({ id: "cut", type: "body_composition", label: "Wedding", targetDate: "2026-10-31", priority: 1, targetMetrics: { targetWeightKg: 78 } }),
+  ];
+  // The default empty list and an explicit empty list must both leave every
+  // number exactly where it was — conditions are additive or they are a
+  // regression in the engine that is the whole product.
+  const implicit = arbitrateWeek(goals, "2026-09-21", athlete);
+  const explicit = arbitrateWeek(goals, "2026-09-21", athlete, [], "2026-09-21");
+  assert.deepEqual(explicit, implicit);
+  assert.equal(implicit.nutritionStance, "deficit", "the fixture must actually be running a deficit for the next test to mean anything");
+
+  const planImplicit = arbitratePlan(goals, "2026-09-15", "2026-10-15", athlete);
+  const planExplicit = arbitratePlan(goals, "2026-09-15", "2026-10-15", athlete, [], "2026-09-15");
+  assert.deepEqual(planExplicit, planImplicit);
+});
+
+test("a cut is paused while a real injury is open, and the athlete is told why", () => {
+  const athlete = cutAthlete();
+  const goals = [goal({ id: "cut", type: "body_composition", label: "Wedding", targetDate: "2026-10-31", priority: 1, targetMetrics: { targetWeightKg: 78 } })];
+  const week = arbitrateWeek(goals, "2026-09-21", athlete, [condition()], "2026-09-21");
+
+  assert.equal(week.nutritionStance, "maintenance", "a deficit on top of a week the injury already shrank is a double cut while tissue is repairing");
+  const explained = week.conflicts.find((c) => c.description.includes("Left calf strain"));
+  assert.ok(explained, "the pause must be explained in the same channel a goal-vs-goal tradeoff uses");
+  assert.match(explained!.description, /Wedding/, "and it must name the goal it paused");
+  assert.ok(!/severity|no_running|deficit_/.test(explained!.description), "no enum values reach the athlete");
+});
+
+test("a niggle does not pause a cut", () => {
+  const athlete = cutAthlete();
+  const goals = [goal({ id: "cut", type: "body_composition", label: "Wedding", targetDate: "2026-10-31", priority: 1, targetMetrics: { targetWeightKg: 78 } })];
+  const week = arbitrateWeek(goals, "2026-09-21", athlete, [condition({ severity: 1, label: "Tight achilles" })], "2026-09-21");
+  assert.equal(week.nutritionStance, "deficit", "severity 1 is something you train around, not something you have to eat for");
+  assert.equal(week.conflicts.length, 0);
+});
+
+test("a closed condition stops pausing the cut the day after it closes", () => {
+  // The Phase 3 archetype: state that should have stopped influencing output.
+  const athlete = cutAthlete();
+  const goals = [goal({ id: "cut", type: "body_composition", label: "Wedding", targetDate: "2026-10-31", priority: 1, targetMetrics: { targetWeightKg: 78 } })];
+  const healed = [condition({ closedAt: "2026-09-20" })];
+
+  const during = arbitrateWeek(goals, "2026-09-14", athlete, healed, "2026-09-28");
+  const after = arbitrateWeek(goals, "2026-09-21", athlete, healed, "2026-09-28");
+  assert.equal(during.nutritionStance, "maintenance", "the week it was open");
+  assert.equal(after.nutritionStance, "deficit", "the week after it closed");
+});
+
+test("conditions never move the load multiplier or the phases", () => {
+  const athlete = cutAthlete();
+  const goals = [
+    goal({ id: "race", type: "endurance_race", label: "Ironman", targetDate: "2027-06-13", priority: 2 }),
+    goal({ id: "cut", type: "body_composition", label: "Wedding", targetDate: "2026-10-31", priority: 1, targetMetrics: { targetWeightKg: 78 } }),
+  ];
+  const without = arbitrateWeek(goals, "2026-09-21", athlete);
+  const with3 = arbitrateWeek(goals, "2026-09-21", athlete, [condition({ kind: "illness", severity: 3, label: "Flu" })], "2026-09-21");
+
+  assert.equal(with3.loadMultiplier, without.loadMultiplier, "what the goals want is unchanged by how the athlete feels — the prescription layer handles that, and it can be checked separately");
+  assert.deepEqual(with3.goalPhases, without.goalPhases);
+});
+
+test("a future week is arbitrated against what is known TODAY, not a guess about recovery", () => {
+  const athlete = cutAthlete();
+  const goals = [goal({ id: "cut", type: "body_composition", label: "Wedding", targetDate: "2026-10-31", priority: 1, targetMetrics: { targetWeightKg: 78 } })];
+  const open = [condition()];
+  const nextMonth = arbitrateWeek(goals, "2026-10-19", athlete, open, "2026-09-21");
+  assert.equal(nextMonth.nutritionStance, "maintenance", "the app cannot know the strain will have healed by then, and pretending it will is the guess-as-fact pattern");
 });

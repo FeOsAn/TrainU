@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, real, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 /** Used by server/db.ts's foreign-database guard — see that file for why it exists. */
 export const APP_ID = "trainu";
@@ -90,6 +90,16 @@ export const sessionCompletions = sqliteTable("session_completions", {
   status: text("status").notNull(),
   prescribedJson: text("prescribed_json"),
   rpe: integer("rpe"),
+  /**
+   * WHY, from a fixed list — see shared/prescription/completion.ts.
+   *
+   * Free text in `note` is unanalysable: "knee" and "sore knee" and "left
+   * knee again" are the same fact three ways and no rule can count them. A
+   * structured reason is what lets a skip mean something later — and it is
+   * also the honest half of asking someone to tick "skipped": if the app
+   * asks why, it owes them something done with the answer.
+   */
+  reason: text("reason"),
   note: text("note"),
   /** The logged/synced trainingSessions row this was satisfied by, when one matches. */
   sessionId: text("session_id"),
@@ -178,3 +188,85 @@ export const capabilityGaps = sqliteTable("capability_gaps", {
   /** How many times assembly has hit this gap — a proxy for how much it matters. */
   seenCount: integer("seen_count").notNull().default(1),
 });
+
+/**
+ * Injuries and illnesses — see shared/conditions.ts for the shapes and the
+ * rules that read them.
+ *
+ * No goal id: a condition is a fact about the BODY, and a calf strain rules
+ * out running whether the goal is a marathon or a wedding. `closed_at` null
+ * means still open, and the app never fills it in on its own — it does not
+ * know that anyone healed.
+ */
+export const conditions = sqliteTable("conditions", {
+  id: text("id").primaryKey(),
+  /** "injury" | "illness" — CONDITION_KINDS. */
+  kind: text("kind").notNull(),
+  /** The athlete's own words, ≤80 chars: "Left calf strain". */
+  label: text("label").notNull(),
+  /** A UI hint source for suggested restrictions. The engine never reads it — it acts on `restrictions_json`, which the athlete confirmed. */
+  bodyPart: text("body_part"),
+  /** 1, 2 or 3. See SEVERITY_LABELS — what it means differs for an injury and an illness. */
+  severity: integer("severity").notNull(),
+  /** Restriction[] (shared/conditions.ts). `[]` is "nothing ruled out". */
+  restrictionsJson: text("restrictions_json").notNull().default("[]"),
+  openedAt: text("opened_at").notNull(),
+  /** YYYY-MM-DD, or null while open. */
+  closedAt: text("closed_at"),
+  note: text("note"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+/**
+ * The morning check-in: one row per DATE, so the primary key IS the upsert
+ * key — checking in twice corrects the day rather than creating a second
+ * opinion about it.
+ *
+ * `adjustments_json` snapshots what this check-in actually changed, for the
+ * same reason `session_completions.prescribed_json` exists: the plan
+ * re-derives, so without the snapshot a month-old "moved Thursday's
+ * threshold session" becomes unreproducible as soon as the goals change.
+ */
+export const dailyCheckIns = sqliteTable("daily_check_ins", {
+  date: text("date").primaryKey(),
+  /** 1 (rough) … 5 (great). */
+  sleepQuality: integer("sleep_quality").notNull(),
+  /** 1 (none) … 5 (wrecked) — inverted in the readiness formula. */
+  soreness: integer("soreness").notNull(),
+  /** 1 (flat) … 5 (fired up). */
+  energy: integer("energy").notNull(),
+  /** Optional. Only ever penalises the score once the athlete's OWN baseline exists — a guessed baseline never moves a number. */
+  restingHrBpm: integer("resting_hr_bpm"),
+  note: text("note"),
+  /** Adjustment[] this check-in produced at write time; "[]" when it wasn't for today. */
+  adjustmentsJson: text("adjustments_json").notNull().default("[]"),
+  recordedAt: text("recorded_at").notNull(),
+});
+
+/**
+ * Weigh-ins and measurements over a cut or a gaining phase.
+ *
+ * Unique per date rather than a free log: bodyweight swings a kilo within a
+ * day, so two entries dated the same day are a correction, not two facts.
+ * The row keeps its own id so a mistyped entry can be deleted — which
+ * matters, because the newest entry is what the plan's calorie targets are
+ * sized from, and an un-deletable typo would steer the athlete's eating for
+ * weeks.
+ */
+export const physiqueEntries = sqliteTable(
+  "physique_entries",
+  {
+    id: text("id").primaryKey(),
+    /** YYYY-MM-DD. */
+    date: text("date").notNull(),
+    weightKg: real("weight_kg"),
+    bodyFatPercent: real("body_fat_percent"),
+    waistCm: real("waist_cm"),
+    note: text("note"),
+    recordedAt: text("recorded_at").notNull(),
+  },
+  (table) => ({
+    dateUnique: uniqueIndex("physique_entries_date_unique").on(table.date),
+  }),
+);

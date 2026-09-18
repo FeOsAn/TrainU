@@ -14,6 +14,7 @@
 
 import type { Goal, GoalConflict } from "../goal";
 import type { AthleteParams } from "../athlete";
+import { isOpenOn, type Condition } from "../conditions";
 import { phaseForGoal, type GoalPhase, type NutritionStance } from "./goalPhase";
 
 export interface ArbitratedWeek {
@@ -35,7 +36,29 @@ function resolutionFor(goalAId: string, goalBId: string, goals: Goal[]): GoalCon
   return a.priority < b.priority ? "goal_a_priority" : "goal_b_priority";
 }
 
-export function arbitrateWeek(goals: Goal[], date: string, athlete: AthleteParams): ArbitratedWeek {
+/**
+ * Severity at which a condition stops being something you train around and
+ * starts being something you have to eat for. A niggle does not pause a cut;
+ * a real injury or a real illness does.
+ */
+const HEALING_SEVERITY = 2;
+
+/**
+ * @param conditions Open and recently-closed injuries/illnesses. Defaults to
+ *   none, and with none the output is byte-identical to what this function
+ *   returned before conditions existed — pinned by a test.
+ * @param today The real current date. A future week can only be arbitrated
+ *   against what is known NOW, so a condition's state is read at
+ *   `min(date, today)`: past weeks see what was true then, future weeks see
+ *   today's state rather than a guess about recovery.
+ */
+export function arbitrateWeek(
+  goals: Goal[],
+  date: string,
+  athlete: AthleteParams,
+  conditions: Condition[] = [],
+  today: string = date,
+): ArbitratedWeek {
   const active = goals.filter((g) => g.active);
   // Keep each goal paired with its own phase rather than relying on two
   // arrays staying index-aligned — filtering below would silently mismatch
@@ -98,6 +121,42 @@ export function arbitrateWeek(goals: Goal[], date: string, athlete: AthleteParam
     }
   }
 
+  /*
+   * ── A deficit does not run through a real injury ──────────────────────
+   *
+   * While a condition of severity 2 or worse is open, the stance is forced
+   * to maintenance. This is not a softening of the goal, it is arithmetic:
+   * the conditions layer strips training load out of the week, which lowers
+   * maintenance energy, and applying a 25% deficit to that already-reduced
+   * number is a double cut landing exactly when tissue repair needs protein
+   * and energy the most. An athlete cutting through a calf strain heals
+   * slower and loses more lean mass for it.
+   *
+   * Deterministic and stated, never silent: the athlete gets the same
+   * explanation channel a goal-vs-goal tradeoff uses, so "why am I not in a
+   * deficit this week" has an answer on the screen.
+   */
+  const asOf = date < today ? date : today;
+  const healing = conditions.filter((c) => c.severity >= HEALING_SEVERITY && isOpenOn(c, asOf));
+  if (healing.length > 0 && nutritionStance !== "maintenance") {
+    const pausedStance = nutritionStance;
+    const paused = live.find(({ phase }) => phase.nutritionStance === pausedStance);
+    nutritionStance = "maintenance";
+    if (paused) {
+      const labels = healing.map((c) => c.label);
+      const named = labels.length === 1 ? labels[0] : `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}`;
+      const what = pausedStance === "deficit" ? "cut" : "gaining phase";
+      conflicts.push({
+        // Both ids are the same goal on purpose: the other party here is a
+        // condition, not a goal, and inventing a fake goal id to fill the
+        // pair would put something in the UI that nothing can look up.
+        betweenGoalIds: [paused.goal.id, paused.goal.id],
+        window: { from: date, to: date },
+        description: `${paused.phase.goalLabel}: your ${what} is paused while ${named} is open — healing costs protein and energy, and eating under maintenance while your body is repairing tissue slows both. It goes back to a ${pausedStance} the week after you mark it healed.`,
+      });
+    }
+  }
+
   return {
     date,
     goalPhases: all.map(({ phase }) => phase),
@@ -152,12 +211,19 @@ function mergeContiguousConflicts(raw: GoalConflict[]): GoalConflict[] {
   return merged;
 }
 
-export function arbitratePlan(goals: Goal[], fromDate: string, toDate: string, athlete: AthleteParams): ArbitratedPlan {
+export function arbitratePlan(
+  goals: Goal[],
+  fromDate: string,
+  toDate: string,
+  athlete: AthleteParams,
+  conditions: Condition[] = [],
+  today: string = fromDate,
+): ArbitratedPlan {
   const weeks: ArbitratedWeek[] = [];
   const cursor = new Date(`${fromDate}T00:00:00Z`);
   const end = new Date(`${toDate}T00:00:00Z`);
   while (cursor <= end) {
-    weeks.push(arbitrateWeek(goals, cursor.toISOString().slice(0, 10), athlete));
+    weeks.push(arbitrateWeek(goals, cursor.toISOString().slice(0, 10), athlete, conditions, today));
     cursor.setUTCDate(cursor.getUTCDate() + 7);
   }
   return { fromDate, toDate, weeks, conflicts: mergeContiguousConflicts(weeks.flatMap((w) => w.conflicts)) };

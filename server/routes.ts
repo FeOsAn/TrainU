@@ -9,6 +9,10 @@ import { type AthleteParams, type AthleteRow, athleteParamsFromRow, withinBounds
 import { measured } from "@shared/measured";
 import type { Sport, TrainingSession } from "@shared/session";
 import { computeTrainingLoad } from "@shared/trainingLoad";
+// addDays and startOfWeek used to be defined here AND in prescribe.ts. One
+// home now (shared/dates.ts) — same bodies, so nothing about the week
+// boundary changes; there is just no longer a second copy to fix.
+import { addDays, startOfWeek } from "@shared/dates";
 import { findDuplicate } from "@shared/sessionDedupe";
 import { parseFitBufferSafely, fitResultToSession } from "./fitIngest";
 import { predictRunRace, predictTriathlon, TRIATHLON_DISTANCES, type TriathlonDistances } from "@shared/predictors/enduranceRace";
@@ -33,19 +37,6 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 
 const uploadLarge = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 const ATHLETE_ROW_ID = "self";
-
-function addDays(date: string, days: number): string {
-  const d = new Date(`${date}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
-}
-
-/** Monday-start, so "this week" means the same thing to the plan engine and the athlete. */
-function startOfWeek(date: string): string {
-  const d = new Date(`${date}T00:00:00Z`);
-  const dayOfWeek = (d.getUTCDay() + 6) % 7; // Monday = 0
-  return addDays(date, -dayOfWeek);
-}
 
 function parseDaysPerWeek(raw: unknown): number | undefined {
   const n = typeof raw === "string" ? parseInt(raw, 10) : undefined;

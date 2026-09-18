@@ -43,7 +43,12 @@ export type Capability =
   | "physique_tracking"
   | "strength_progression"
   | "lift_1rm_tracking"
-  | "race_day_pacing";
+  | "race_day_pacing"
+  | "condition_adjustment"
+  | "readiness_modulation"
+  | "goal_what_if"
+  | "adherence_learning"
+  | "week_replanning";
 
 /** Where an assembled block renders. Routes are themselves assembled — see `assemble()`. */
 export type SurfaceId = "plan" | "athlete" | "goals" | "coach" | "data";
@@ -74,6 +79,14 @@ export interface Block {
   /** Narrows further within a goal type: a marathoner and an Ironman athlete are both `endurance_race`. */
   disciplines?: Discipline[];
   requiresFeature?: keyof FeaturePreferences;
+  /**
+   * A POSITIVE trigger, unlike `requiresFeature`'s gate: any one of these
+   * preferences being true makes the block apply even when the goal model
+   * doesn't imply it. A runner who owns a bike gets the FTP field, because
+   * an injury substitute is priced off it — and a number the engine uses is
+   * a number the athlete must be able to see and correct.
+   */
+  enabledByFeature?: Array<keyof FeaturePreferences>;
   requiresConnector?: keyof ConnectorPreferences;
   /** Lower sorts higher on its surface. */
   rank: number;
@@ -172,6 +185,7 @@ export const BLOCKS: Block[] = [
     provides: [],
     goalTypes: ["endurance_race"],
     disciplines: ["triathlon", "cycling", "swimming"],
+    enabledByFeature: ["hasBike", "hasPool"],
     rank: 20,
     status: "built",
     note: "CdA, FTP and critical swim speed only mean something once you're racing more than one discipline.",
@@ -185,13 +199,12 @@ export const BLOCKS: Block[] = [
     provides: ["station_benchmarks"],
     goalTypes: ["hyrox"],
     rank: 25,
-    // `AthleteParams.benchmarks` holds these and `calibrateBenchmark()` can
-    // write them, but nothing renders or edits them — so a HYROX athlete has
-    // no way to put a real sled-push time in. Declared rather than quietly
-    // treated as present: the catalog is only worth anything if "built" means
-    // built.
-    status: "planned",
-    note: "Your sled, ski-erg and burpee-broad-jump times. The engine can use them; there's no screen to enter them yet.",
+    // Declared `planned` for two phases because `AthleteParams.benchmarks`
+    // and `calibrateBenchmark()` existed while nothing let the athlete enter
+    // a time — the catalog is only worth anything if "built" means built.
+    // Now it means built.
+    status: "built",
+    note: "Your sled, ski-erg and burpee-broad-jump times, in race order. The engine already uses them; this is where they come from.",
   },
 
   // ─── Strength ──────────────────────────────────────────────────────────────
@@ -330,27 +343,21 @@ export const BLOCKS: Block[] = [
     status: "built",
   },
 
-  // ─── Declared, not built ───────────────────────────────────────────────────
-  /*
-   * Everything below is a real gap, named rather than silently absent.
-   *
-   * `athlete.physique` is the sharpest example of why this catalog exists at
-   * all: onboarding asks every athlete whether they want physique tracking and
-   * writes the answer to `preferences.features.physiqueTracking` — and then
-   * nothing in the app ever reads it. The preference has been collected since
-   * Phase 4 and dropped on the floor every time. Declaring the block is what
-   * turns that from an invisible dead end into a queue entry.
-   */
+  // ─── Body composition ──────────────────────────────────────────────────────
   {
     id: "athlete.physique",
     title: "Physique progress",
     surface: "athlete",
     provides: ["physique_tracking"],
-    goalTypes: ["body_composition"],
+    // Not just a cutting athlete's block: a HYROX competitor making a weight
+    // class, or a triathlete watching power-to-weight, asked for exactly this
+    // and was told a built feature wasn't built. The feature preference is
+    // the gate; the goal type is not.
+    goalTypes: "*",
     requiresFeature: "physiqueTracking",
     rank: 45,
-    status: "planned",
-    note: "Photo and measurement tracking over a cut. You asked for this during onboarding — it isn't built yet.",
+    status: "built",
+    note: "Weigh-ins and measurements over time, against what your goal actually needs — the trend, not one morning's number.",
   },
   {
     id: "plan.pacing",
@@ -358,11 +365,109 @@ export const BLOCKS: Block[] = [
     surface: "plan",
     provides: ["race_day_pacing"],
     goalTypes: ["endurance_race", "hyrox"],
+    // The planners sit on the three predictors that exist. A standalone bike
+    // or swim race has no predictor, so it has no honest pacing plan either
+    // — matching engine.racePrediction rather than quietly inventing splits.
+    disciplines: ["run", "triathlon", "other"],
     rank: 18,
+    status: "built",
+    note: "Split-by-split targets for the day itself, off your own numbers — including how far ahead of them your target is.",
+  },
+
+  // ─── Health and readiness ──────────────────────────────────────────────────
+  /*
+   * These blocks carry their capability THEMSELVES rather than having a
+   * matching engine twin, deliberately. The capability is what the engine
+   * checks before it modulates a week, so switching the block off in "Your
+   * app" switches the behaviour off too — through the one matching rule that
+   * already exists, rather than a second flag that would eventually disagree
+   * with the first.
+   */
+  {
+    id: "plan.checkIn",
+    title: "Morning check-in",
+    surface: "plan",
+    provides: ["readiness_modulation"],
+    goalTypes: "*",
+    rank: 9,
+    status: "built",
+    note: "Three taps each morning. Low readiness makes today easier or moves it; it never touches tomorrow, and it never adds load.",
+  },
+  {
+    id: "plan.conditions",
+    title: "Something hurts?",
+    surface: "plan",
+    provides: ["condition_adjustment"],
+    goalTypes: "*",
+    rank: 11,
+    status: "built",
+    note: "Tell the app what's injured or what you've come down with, and the week works around it instead of you guessing which sessions to drop.",
+  },
+  {
+    id: "athlete.conditions",
+    title: "Injuries & illness",
+    surface: "athlete",
+    provides: [],
+    goalTypes: "*",
+    rank: 5,
+    status: "built",
+  },
+
+  // ─── Goals ─────────────────────────────────────────────────────────────────
+  {
+    id: "goals.whatIf",
+    title: "What if I changed this?",
+    surface: "goals",
+    provides: ["goal_what_if"],
+    goalTypes: "*",
+    rank: 20,
+    status: "built",
+    note: "Try a different date or priority and see what it does to your week before you commit to it.",
+  },
+
+  // ─── Declared, not built ───────────────────────────────────────────────────
+  /*
+   * Everything below is a real gap, named rather than silently absent.
+   *
+   * Both of these need something no code can supply: WEEKS OF YOUR OWN
+   * HISTORY. Shipping either one on an empty database would mean rules whose
+   * first real action is two months away and which have never run against
+   * real data — the exact thing Phase 6's own caveat warns about. The
+   * session feedback that feeds them is built and collecting from today.
+   */
+  {
+    id: "plan.learned",
+    title: "What the app has learned about you",
+    surface: "plan",
+    provides: ["adherence_learning"],
+    goalTypes: "*",
+    rank: 25,
     status: "planned",
-    note: "Split-by-split targets for the race itself. The predictors know your finishing time; nothing turns it into a plan for the day yet.",
+    note: "Once there are a month or two of ticked-off sessions, the plan should notice what you actually do — which session you always skip, which day never works — and prescribe for you rather than for an average athlete. It needs your history first, so it isn't built yet: what it needs is being collected from today.",
+  },
+  {
+    id: "plan.adjustments",
+    title: "Re-plan the rest of the week",
+    surface: "plan",
+    provides: ["week_replanning"],
+    goalTypes: "*",
+    rank: 13,
+    status: "planned",
+    note: "Miss Tuesday and the remaining days should rearrange themselves around it instead of leaving you to work out what still fits. Doing that safely means knowing which sessions you really do move and which you drop — the same history the learning above is waiting on — so it isn't built yet.",
   },
 ];
+
+/**
+ * Needed by every goal, and built by none of them yet.
+ *
+ * Listing them as needs is the whole point of this catalog: an athlete
+ * training towards anything is better served by a plan that adapts to what
+ * they actually do and rearranges around a missed day, so the honest thing
+ * is to say so in "Not built yet" rather than leave the absence invisible.
+ * Switching the block off silences its gap, which is the athlete's answer to
+ * being told about something they don't want.
+ */
+const UNIVERSAL_UNBUILT_NEEDS: Capability[] = ["adherence_learning", "week_replanning"];
 
 /**
  * What each goal type needs from the app to be served honestly. This is the
@@ -371,11 +476,11 @@ export const BLOCKS: Block[] = [
  * quietly rendering whatever blocks happen to apply.
  */
 export const CAPABILITY_NEEDS: Record<GoalType, Capability[]> = {
-  endurance_race: ["goal_arbitration", "session_prescription", "run_prescription", "race_time_prediction", "training_load", "race_day_pacing"],
-  hyrox: ["goal_arbitration", "session_prescription", "run_prescription", "station_benchmarks", "compromised_running", "strength_progression", "race_time_prediction", "race_day_pacing"],
-  body_composition: ["goal_arbitration", "session_prescription", "body_comp_projection", "nutrition_targets", "strength_progression"],
-  strength: ["goal_arbitration", "session_prescription", "lift_1rm_tracking", "strength_progression"],
-  general_fitness: ["goal_arbitration", "session_prescription", "training_load"],
+  endurance_race: ["goal_arbitration", "session_prescription", "run_prescription", "race_time_prediction", "training_load", "race_day_pacing", ...UNIVERSAL_UNBUILT_NEEDS],
+  hyrox: ["goal_arbitration", "session_prescription", "run_prescription", "station_benchmarks", "compromised_running", "strength_progression", "race_time_prediction", "race_day_pacing", ...UNIVERSAL_UNBUILT_NEEDS],
+  body_composition: ["goal_arbitration", "session_prescription", "body_comp_projection", "nutrition_targets", "strength_progression", ...UNIVERSAL_UNBUILT_NEEDS],
+  strength: ["goal_arbitration", "session_prescription", "lift_1rm_tracking", "strength_progression", ...UNIVERSAL_UNBUILT_NEEDS],
+  general_fitness: ["goal_arbitration", "session_prescription", "training_load", ...UNIVERSAL_UNBUILT_NEEDS],
 };
 
 /** Extra needs a discipline adds on top of its goal type's. */
@@ -415,4 +520,9 @@ export const CAPABILITY_LABELS: Record<Capability, string> = {
   strength_progression: "Strength progression",
   lift_1rm_tracking: "1RM tracking",
   race_day_pacing: "A race-day pacing plan",
+  condition_adjustment: "Training around an injury or illness",
+  readiness_modulation: "Adjusting today to how you woke up",
+  goal_what_if: "Trying a change before you commit to it",
+  adherence_learning: "Learning what you actually do",
+  week_replanning: "Rearranging the week when you miss a day",
 };

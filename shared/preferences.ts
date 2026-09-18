@@ -7,6 +7,23 @@ export interface ConnectorPreferences {
 
 export interface FeaturePreferences {
   physiqueTracking: boolean;
+  /**
+   * Whether a bike / a pool is actually reachable.
+   *
+   * Not a nicety: when an injury rules out running, whether a substitute
+   * exists at all decides between "Endurance ride instead of your long run"
+   * and an honest rest day. Guessing wrong in either direction is bad —
+   * prescribing a ride to someone with no bike is a session they cannot do,
+   * and defaulting everyone to rest strips training from people who had a
+   * perfectly good alternative. So it is asked, and it defaults to false:
+   * we assume nothing we were not told.
+   *
+   * A live goal can imply these (a triathlete plainly has both) — that
+   * inference lives with the conditions feature, not in the stored value, so
+   * the athlete's own answer is never overwritten by a goal.
+   */
+  hasBike: boolean;
+  hasPool: boolean;
 }
 
 /**
@@ -32,4 +49,4 @@ export type BlockPreferences = Record<string, BlockChoice>;
 export const DEFAULT_BLOCK_PREFERENCES: BlockPreferences = {};
 
 export const DEFAULT_CONNECTOR_PREFERENCES: ConnectorPreferences = { garmin: false, whoop: false, appleHealth: false };
-export const DEFAULT_FEATURE_PREFERENCES: FeaturePreferences = { physiqueTracking: false };
+export const DEFAULT_FEATURE_PREFERENCES: FeaturePreferences = { physiqueTracking: false, hasBike: false, hasPool: false };

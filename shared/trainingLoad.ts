@@ -50,7 +50,15 @@ export interface TrainingLoadSummary {
 
 const FRIEL_TSS_PER_HOUR: Record<string, number> = { Z1: 30, Z2: 55, Z3: 70, Z4: 90, Z5: 110 };
 
-const SPORT_FALLBACK_PER_MIN: Record<Sport, number> = {
+/**
+ * Load per minute when nothing better is available. Exported because it is
+ * also the honest exchange rate BETWEEN sports: a ride does not cost what a
+ * run costs for the same clock time, so substituting minute-for-minute
+ * silently changes the week's stress. See SPORT_EQUIVALENCE in
+ * shared/prescription/templates.ts, which derives from this table rather
+ * than restating the numbers.
+ */
+export const SPORT_FALLBACK_PER_MIN: Record<Sport, number> = {
   run: 0.85,
   bike: 0.7,
   swim: 0.5,

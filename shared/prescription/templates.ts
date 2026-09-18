@@ -10,7 +10,8 @@
  */
 
 import { type Discipline, type GoalType, defaultDiscipline } from "../goal";
-import type { SessionKind } from "./sessionKinds";
+import { SESSION_KINDS, type Intensity, type PlannedSport, type SessionKind } from "./sessionKinds";
+import { SPORT_FALLBACK_PER_MIN } from "../trainingLoad";
 
 /**
  * A goal type's qualities, MOST IMPORTANT FIRST. When days are scarce the
@@ -208,11 +209,174 @@ export const DOWNGRADE: Partial<Record<SessionKind, SessionKind>> = {
   compromised: "run_easy",
 };
 
+/**
+ * Walk DOWNGRADE to a FIXED POINT — the first kind with no further downgrade.
+ *
+ * This exists because a single step is not what "easy" means. `DOWNGRADE`
+ * takes `run_intervals` to `run_threshold`, which is still a hard session:
+ * an ill athlete told to train easy was being handed a threshold run. Two
+ * steps get to `run_easy`, which is what was meant. Anything that intends an
+ * easy ceiling goes through here, never through one lookup.
+ *
+ * The loop guard is not paranoia — DOWNGRADE is hand-edited data, and a
+ * cycle in it would otherwise hang the request rather than fail loudly.
+ */
+export function downgradeToEasy(kind: SessionKind): SessionKind {
+  let current = kind;
+  for (let steps = 0; steps < SESSION_KINDS.length; steps++) {
+    const next = DOWNGRADE[current];
+    if (!next || next === current) return current;
+    current = next;
+  }
+  throw new Error(`DOWNGRADE has a cycle reachable from ${kind}`);
+}
+
 export function applyCeiling(kind: SessionKind, ceiling: IntensityCeiling): SessionKind {
   if (ceiling === "full") return kind;
   if (ceiling === "threshold") {
     return kind === "run_intervals" || kind === "compromised" ? (DOWNGRADE[kind] ?? kind) : kind;
   }
-  // "easy" — strip everything hard back to aerobic work.
-  return DOWNGRADE[kind] ?? kind;
+  // "easy" — strip everything hard back to aerobic work, all the way down.
+  // Delegated rather than reimplemented so the ceiling and the explicit
+  // easy-downgrade can never disagree about what "easy" means.
+  return downgradeToEasy(kind);
+}
+
+/*
+ * ─── The session vocabulary ────────────────────────────────────────────────
+ *
+ * These five tables were private to prescribe.ts. They are here because they
+ * answer "what IS this kind of session" — a question the prescriber, the
+ * modulation layer and every future slice that substitutes or downgrades a
+ * session all have to answer identically. A second copy anywhere is the
+ * SESSION_KINDS mistake one level up: a substituted ride titled by one table
+ * and priced by another is two sessions wearing one name.
+ */
+
+export const SPORT_OF: Record<SessionKind, PlannedSport> = {
+  run_easy: "run",
+  run_long: "run",
+  run_threshold: "run",
+  run_intervals: "run",
+  bike_endurance: "bike",
+  swim_technique: "swim",
+  compromised: "hybrid",
+  station_work: "station",
+  strength_lower: "strength",
+  strength_push: "strength",
+  strength_pull: "strength",
+  rest: "other",
+};
+
+export const INTENSITY_OF: Record<SessionKind, Intensity> = {
+  run_easy: "easy",
+  run_long: "moderate",
+  run_threshold: "hard",
+  run_intervals: "hard",
+  bike_endurance: "easy",
+  swim_technique: "easy",
+  compromised: "hard",
+  station_work: "moderate",
+  strength_lower: "moderate",
+  strength_push: "moderate",
+  strength_pull: "moderate",
+  rest: "rest",
+};
+
+export const HARD_KINDS: ReadonlySet<SessionKind> = new Set<SessionKind>(
+  SESSION_KINDS.filter((kind) => INTENSITY_OF[kind] === "hard"),
+);
+
+export const TITLE_OF: Record<SessionKind, string> = {
+  run_easy: "Easy run",
+  run_long: "Long run",
+  run_threshold: "Threshold run",
+  run_intervals: "Intervals",
+  bike_endurance: "Endurance ride",
+  swim_technique: "Swim — technique",
+  compromised: "Compromised running",
+  station_work: "Station work",
+  strength_lower: "Strength — lower",
+  strength_push: "Strength — push",
+  strength_pull: "Strength — pull",
+  rest: "Rest",
+};
+
+export const FOCUS_OF: Record<SessionKind, string> = {
+  run_easy: "Aerobic volume that costs almost nothing to recover from.",
+  run_long: "The single highest-return session for any distance goal.",
+  run_threshold: "Raises the pace you can hold before it falls apart.",
+  run_intervals: "Top-end. Small doses, fully recovered.",
+  bike_endurance: "Aerobic volume with no impact cost.",
+  swim_technique: "Swimming is technique-limited long before it's fitness-limited.",
+  compromised: "Running well on legs that have just been wrecked — the race, not a run.",
+  station_work: "Time under the exact loads race day will ask for.",
+  strength_lower: "Raises the ceiling every endurance quality sits under.",
+  strength_push: "Upper-body pressing strength and shoulder durability.",
+  strength_pull: "Posterior chain and grip — the two things that quietly cap everything.",
+  rest: "Adaptation happens here, not in the sessions.",
+};
+
+/** Keep a session's minutes inside what that kind plausibly is. The ONE clamp — a slice that sizes a session without it re-creates the 225-minute "easy run". */
+export function clampKind(kind: SessionKind, minutes: number): number {
+  const bounds = KIND_MINUTES[kind];
+  return Math.min(bounds.max, Math.max(bounds.min, Math.round(minutes)));
+}
+
+/** RPE the session is prescribed AT, which is what prices its planned TSS. */
+export function rpeFor(kind: SessionKind): number {
+  switch (INTENSITY_OF[kind]) {
+    case "hard":
+      return 8;
+    case "moderate":
+      return 6;
+    case "easy":
+      return 4;
+    default:
+      return 1;
+  }
+}
+
+/**
+ * Converting a session's DURATION when it is substituted across sports, so
+ * the substitute carries the same training LOAD rather than the same clock
+ * time.
+ *
+ * Minutes are not load. `SPORT_FALLBACK_PER_MIN` (shared/trainingLoad.ts,
+ * the same table that prices a logged session when nothing better exists)
+ * says a minute of running is 0.85, a minute of riding 0.70 and a minute of
+ * swimming 0.50. So swapping a 60-minute run for a 60-minute ride quietly
+ * removes 18% of the week's stress, and swapping it for a swim removes 41% —
+ * a "substitution" that is really an unannounced rest day.
+ *
+ * Derived from that table rather than restated, because two tables of the
+ * same exchange rates is exactly the drift this file exists to prevent.
+ * Read it as: minutes_to = minutes_from × SPORT_EQUIVALENCE[from][to].
+ *
+ * A word of honesty about the numbers: they equate ENERGY COST, not
+ * specificity. An hour of riding is not an hour of running for a marathoner
+ * no matter how the arithmetic comes out — which is why substitution is a
+ * fallback for an injured athlete, never an optimisation.
+ */
+export const SPORT_EQUIVALENCE: Record<PlannedSport, Record<PlannedSport, number>> = (() => {
+  const sports: PlannedSport[] = ["run", "bike", "swim", "strength", "hybrid", "station", "other"];
+  const table = {} as Record<PlannedSport, Record<PlannedSport, number>>;
+  for (const from of sports) {
+    table[from] = {} as Record<PlannedSport, number>;
+    for (const to of sports) {
+      table[from][to] = Math.round((SPORT_FALLBACK_PER_MIN[from] / SPORT_FALLBACK_PER_MIN[to]) * 100) / 100;
+    }
+  }
+  return table;
+})();
+
+/**
+ * The minutes of `toKind` that carry the same load as `minutes` of
+ * `fromKind`, clamped to what that kind plausibly is. Clamped here rather
+ * than by the caller so a substitute can never come back as a 12-minute
+ * swim or a four-hour ride.
+ */
+export function equivalentMinutes(fromKind: SessionKind, toKind: SessionKind, minutes: number): number {
+  const factor = SPORT_EQUIVALENCE[SPORT_OF[fromKind]][SPORT_OF[toKind]];
+  return clampKind(toKind, minutes * factor);
 }

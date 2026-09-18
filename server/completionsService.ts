@@ -63,6 +63,10 @@ export function recordCompletion(input: RecordCompletionInput): CompletionRecord
     status: input.status,
     prescribedJson: input.prescribed ? JSON.stringify(input.prescribed) : null,
     rpe: input.rpe ?? null,
+    // The structured skip reason: the column exists, nothing collects it yet.
+    // Written as an explicit null rather than left off so the row shape and
+    // the table agree in one place.
+    reason: null as string | null,
     note: input.note ?? null,
     sessionId: input.sessionId ?? null,
     recordedAt: new Date().toISOString(),

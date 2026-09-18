@@ -20,8 +20,26 @@ import { type Goal, defaultDiscipline } from "../goal";
 import type { ArbitratedWeek } from "../arbitration/arbitrate";
 import { estimateSessionTss } from "../trainingLoad";
 import type { Sport } from "../session";
-import { BASELINE_MINUTES_PER_DAY, DEFAULT_PHASE_SHAPE, DOWNGRADE, KIND_MINUTES, PHASE_SHAPES, applyCeiling, qualitiesFor, ANCHOR_KIND, kindWeight } from "./templates";
-import type { PlannedSession, PlannedSport, PrescribedWeek, SessionKind } from "./sessionKinds";
+import { addDays } from "../dates";
+import {
+  ANCHOR_KIND,
+  BASELINE_MINUTES_PER_DAY,
+  DEFAULT_PHASE_SHAPE,
+  DOWNGRADE,
+  FOCUS_OF,
+  HARD_KINDS,
+  INTENSITY_OF,
+  KIND_MINUTES,
+  PHASE_SHAPES,
+  SPORT_OF,
+  TITLE_OF,
+  applyCeiling,
+  clampKind,
+  kindWeight,
+  qualitiesFor,
+  rpeFor,
+} from "./templates";
+import type { AdjustedFrom, PlannedSession, PrescribedWeek, SessionKind, SessionOccurrence } from "./sessionKinds";
 
 // FRESH_KM_TO_THRESHOLD / FRESH_KM_TO_INTERVAL live in shared/athlete.ts,
 // next to the field they convert — see the note there about the predictor
@@ -32,46 +50,13 @@ const STRENGTH_MINUTES = 50;
 
 const STRENGTH_KINDS: ReadonlySet<SessionKind> = new Set(["strength_lower", "strength_push", "strength_pull"]);
 
-const SPORT_OF: Record<SessionKind, PlannedSport> = {
-  run_easy: "run",
-  run_long: "run",
-  run_threshold: "run",
-  run_intervals: "run",
-  bike_endurance: "bike",
-  swim_technique: "swim",
-  compromised: "hybrid",
-  station_work: "station",
-  strength_lower: "strength",
-  strength_push: "strength",
-  strength_pull: "strength",
-  rest: "other",
-};
-
-const INTENSITY_OF: Record<SessionKind, PlannedSession["intensity"]> = {
-  run_easy: "easy",
-  run_long: "moderate",
-  run_threshold: "hard",
-  run_intervals: "hard",
-  bike_endurance: "easy",
-  swim_technique: "easy",
-  compromised: "hard",
-  station_work: "moderate",
-  strength_lower: "moderate",
-  strength_push: "moderate",
-  strength_pull: "moderate",
-  rest: "rest",
-};
-
-const HARD_KINDS: ReadonlySet<SessionKind> = new Set(["run_threshold", "run_intervals", "compromised"]);
+// SPORT_OF / INTENSITY_OF / HARD_KINDS / TITLE_OF / FOCUS_OF / clampKind /
+// rpeFor now live in templates.ts: they answer "what IS this kind of
+// session", which the modulation layer has to answer identically when it
+// substitutes or downgrades one. One table, imported back here.
 
 function pace(secPerKm: number): string {
   return `${Math.floor(secPerKm / 60)}:${String(Math.round(secPerKm % 60)).padStart(2, "0")}/km`;
-}
-
-function addDays(date: string, days: number): string {
-  const d = new Date(`${date}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
 }
 
 export interface PrescribeOptions {
@@ -144,63 +129,158 @@ function targetsFor(kind: SessionKind, athlete: AthleteParams, minutes: number):
   }
 }
 
-const TITLE_OF: Record<SessionKind, string> = {
-  run_easy: "Easy run",
-  run_long: "Long run",
-  run_threshold: "Threshold run",
-  run_intervals: "Intervals",
-  bike_endurance: "Endurance ride",
-  swim_technique: "Swim — technique",
-  compromised: "Compromised running",
-  station_work: "Station work",
-  strength_lower: "Strength — lower",
-  strength_push: "Strength — push",
-  strength_pull: "Strength — pull",
-  rest: "Rest",
-};
+export interface AssignDatesOptions {
+  /**
+   * The kind that gets the week's protected weekend slot. Defaults to
+   * `run_long`, which is what this function did before it took options at
+   * all — a runner's week is unchanged. Only the FIRST occurrence is pinned:
+   * a cycling week with three rides pins one and spreads the rest.
+   */
+  anchorKind?: SessionKind;
+  /**
+   * Weekday offsets the athlete can actually train, 0 = Monday … 6 = Sunday.
+   * Defaults to all seven.
+   *
+   * This is a HARD constraint and the weekend pin is only a preference. The
+   * athlete's own statement about which days exist outranks the engine's
+   * opinion about which day is nicest for a long session — pinning a long
+   * run to a Saturday someone has told us they cannot train is worse than
+   * any layout compromise.
+   */
+  trainingDays?: number[];
+  /**
+   * Explicit offsets by index into `kinds`, for a session the athlete (or an
+   * earlier layer) has already placed. Highest precedence of all — including
+   * over `trainingDays`, because a session pinned to a day is a statement
+   * about that specific session, not a default.
+   */
+  pinned?: Record<number, number>;
+}
 
-const FOCUS_OF: Record<SessionKind, string> = {
-  run_easy: "Aerobic volume that costs almost nothing to recover from.",
-  run_long: "The single highest-return session for any distance goal.",
-  run_threshold: "Raises the pace you can hold before it falls apart.",
-  run_intervals: "Top-end. Small doses, fully recovered.",
-  bike_endurance: "Aerobic volume with no impact cost.",
-  swim_technique: "Swimming is technique-limited long before it's fitness-limited.",
-  compromised: "Running well on legs that have just been wrecked — the race, not a run.",
-  station_work: "Time under the exact loads race day will ask for.",
-  strength_lower: "Raises the ceiling every endurance quality sits under.",
-  strength_push: "Upper-body pressing strength and shoulder durability.",
-  strength_pull: "Posterior chain and grip — the two things that quietly cap everything.",
-  rest: "Adaptation happens here, not in the sessions.",
-};
+const HARD_FIRST_CHOICE = [1, 3, 5, 0, 2, 4, 6];
+const EASY_FIRST_CHOICE = [0, 2, 4, 6, 1, 3, 5];
 
 /**
- * Lay the week out so hard days don't stack. The long session goes to
- * Saturday (day 5), and hard sessions are spread across the remaining days
- * as evenly as the count allows rather than landing back to back.
+ * Lay the week out so hard days don't stack. The anchor takes the last
+ * training day of the week — Saturday if it's available, else Sunday, else
+ * the latest day that is — and everything else is spread across the
+ * remaining days as evenly as the count allows.
+ *
+ * Precedence, in order: `pinned` › `trainingDays` › the weekend anchor
+ * preference › the hard/easy spread. Called with no options it produces
+ * exactly the offsets it always did.
  */
-function assignDates(weekStart: string, kinds: SessionKind[]): string[] {
-  const HARD_FIRST_CHOICE = [1, 3, 5, 0, 2, 4, 6];
-  const EASY_FIRST_CHOICE = [0, 2, 4, 6, 1, 3, 5];
+function assignDates(weekStart: string, kinds: SessionKind[], options: AssignDatesOptions = {}): string[] {
+  const anchorKind = options.anchorKind ?? "run_long";
+  const legal = (options.trainingDays ?? [0, 1, 2, 3, 4, 5, 6]).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6);
+  const allowed = new Set<number>(legal.length > 0 ? legal : [0, 1, 2, 3, 4, 5, 6]);
   const taken = new Set<number>();
   const offsets: number[] = new Array(kinds.length);
 
-  kinds.forEach((kind, i) => {
-    if (kind === "run_long") {
-      offsets[i] = 5;
-      taken.add(5);
-    }
-  });
+  const claim = (i: number, slot: number) => {
+    offsets[i] = slot;
+    taken.add(slot);
+  };
 
+  // 1. Explicit pins win outright.
+  for (const [rawIndex, rawOffset] of Object.entries(options.pinned ?? {})) {
+    const i = Number(rawIndex);
+    if (!Number.isInteger(i) || i < 0 || i >= kinds.length) continue;
+    if (!Number.isInteger(rawOffset) || rawOffset < 0 || rawOffset > 6) continue;
+    claim(i, rawOffset);
+  }
+
+  // 2. The anchor takes the latest legal day, preferring the weekend.
+  const anchorIndex = kinds.findIndex((kind, i) => kind === anchorKind && offsets[i] === undefined);
+  if (anchorIndex >= 0) {
+    const preference = [5, 6, ...[4, 3, 2, 1, 0]];
+    const slot = preference.find((d) => allowed.has(d) && !taken.has(d));
+    if (slot !== undefined) claim(anchorIndex, slot);
+  }
+
+  // 3. Everything else spreads, hard sessions first-choice on alternating days.
   kinds.forEach((kind, i) => {
     if (offsets[i] !== undefined) return;
     const order = HARD_KINDS.has(kind) ? HARD_FIRST_CHOICE : EASY_FIRST_CHOICE;
-    const slot = order.find((d) => !taken.has(d)) ?? order.find(() => true)!;
-    taken.add(slot);
-    offsets[i] = slot;
+    const slot = order.find((d) => allowed.has(d) && !taken.has(d));
+    if (slot !== undefined) {
+      claim(i, slot);
+      return;
+    }
+    /*
+     * Nothing legal is free. The old fallback took the first preference
+     * regardless of occupancy, which silently doubled a session onto a day
+     * that already had one of the same kind — and two sessions sharing a
+     * (date, kind) share a completion key, so ticking one ticked both. Put
+     * it on the least-loaded legal day instead, earliest breaking the tie.
+     */
+    const counts = new Map<number, number>();
+    for (const day of allowed) counts.set(day, 0);
+    for (const assigned of offsets) {
+      if (assigned === undefined || !counts.has(assigned)) continue;
+      counts.set(assigned, counts.get(assigned)! + 1);
+    }
+    const least = [...counts.entries()].sort((a, b) => a[1] - b[1] || a[0] - b[0])[0]![0];
+    claim(i, least);
   });
 
   return offsets.map((o) => addDays(weekStart, o));
+}
+
+export interface BuildSessionOptions {
+  occurrence?: SessionOccurrence;
+  /** Overrides the RPE this session is priced at. Defaults to `rpeFor(kind)` — pass it only when the session genuinely is not that kind's usual effort. */
+  targetRpe?: number;
+  /** Overrides the "For <goal>." line — the modulation layer puts its reason here. */
+  note?: string;
+  adjustedFrom?: AdjustedFrom;
+}
+
+/**
+ * The ONE way a PlannedSession is created.
+ *
+ * Every layer that substitutes, downgrades, shortens or re-lands a session
+ * goes through here rather than patching fields on a copy, because the
+ * targets and the duration are two statements of the same fact: a session
+ * whose `durationMinutes` was edited to 42 while its targets still read
+ * "60 min continuous" is a card that contradicts itself, and the athlete has
+ * no way to know which number the engine actually meant. Rebuilding is also
+ * what keeps a downgraded session priced by the same `estimateSessionTss`
+ * the ledger prices a logged one with.
+ */
+export function buildSession(
+  kind: SessionKind,
+  date: string,
+  durationMinutes: number,
+  athlete: AthleteParams,
+  servesGoalIds: string[],
+  goalLabels: string[],
+  opts: BuildSessionOptions = {},
+): PlannedSession {
+  const sport = SPORT_OF[kind];
+  const targetRpe = opts.targetRpe ?? rpeFor(kind);
+  return {
+    date,
+    kind,
+    sport,
+    title: TITLE_OF[kind],
+    focus: FOCUS_OF[kind],
+    durationMinutes,
+    // Priced with the same function the ledger prices logged sessions with,
+    // so the planned week and the recorded week are on one scale.
+    tss: estimateSessionTss({ sport: sport as Sport, durationMinutes, rpe: targetRpe }, athlete),
+    intensity: INTENSITY_OF[kind],
+    targets: targetsFor(kind, athlete, durationMinutes),
+    servesGoalIds,
+    note:
+      opts.note ??
+      (goalLabels.length > 1
+        ? `Serves ${goalLabels.join(" and ")} at once — one session, both goals.`
+        : `For ${goalLabels[0]}.`),
+    targetRpe,
+    ...(opts.occurrence ? { occurrence: opts.occurrence } : {}),
+    ...(opts.adjustedFrom ? { adjustedFrom: opts.adjustedFrom } : {}),
+  };
 }
 
 export function prescribeWeek(week: ArbitratedWeek, goals: Goal[], athlete: AthleteParams, options: PrescribeOptions = {}): PrescribedWeek {
@@ -214,13 +294,26 @@ export function prescribeWeek(week: ArbitratedWeek, goals: Goal[], athlete: Athl
     .filter((entry) => entry.goal)
     .sort((a, b) => a.goal!.priority - b.goal!.priority || a.goal!.targetDate.localeCompare(b.goal!.targetDate))[0];
   const shape = dominant ? (PHASE_SHAPES[dominant.phase.phaseName] ?? DEFAULT_PHASE_SHAPE) : DEFAULT_PHASE_SHAPE;
+  // Reported rather than left to be inferred from loadMultiplier: the blend
+  // across goals makes that inference wrong exactly when it matters (see
+  // PrescribedWeek.phaseName). With no live goal there is no phase to be in,
+  // and "maintain" is what the shape defaults to.
+  const phaseName = dominant?.phase.phaseName ?? "maintain";
   // The dominant goal sets the week's discipline as well as its phase: a
   // triathlete's week is shaped around the bike even when a second, lower-
   // priority goal contributes run and strength slots to it.
   const discipline = dominant?.goal ? (dominant.goal.discipline ?? defaultDiscipline(dominant.goal.type)) : "other";
 
   if (livePhases.length === 0) {
-    return { weekStart: week.date, sessions: [], totalMinutes: 0, totalTss: 0, loadMultiplier: week.loadMultiplier, note: "No active goals — nothing to prescribe." };
+    return {
+      weekStart: week.date,
+      sessions: [],
+      totalMinutes: 0,
+      totalTss: 0,
+      loadMultiplier: week.loadMultiplier,
+      phaseName,
+      note: "No active goals — nothing to prescribe.",
+    };
   }
 
   // ── Slot allocation, merging duplicates so one session can serve two goals ──
@@ -315,27 +408,19 @@ export function prescribeWeek(week: ArbitratedWeek, goals: Goal[], athlete: Athl
 
   const dates = assignDates(week.date, picked.map((p) => p.kind));
 
+  // Which of N sessions of this kind each one is, in allocation order. The
+  // sizing is still equal per kind; this only records the position, so a
+  // later layer can tell the week's second ride from its anchor.
+  const kindTotals = new Map<SessionKind, number>();
+  for (const p of picked) kindTotals.set(p.kind, (kindTotals.get(p.kind) ?? 0) + 1);
+  const kindSeen = new Map<SessionKind, number>();
+
   const sessions: PlannedSession[] = picked.map((p, i) => {
-    const durationMinutes = minutesFor(p.kind);
-    const sport = SPORT_OF[p.kind];
-    return {
-      date: dates[i]!,
-      kind: p.kind,
-      sport,
-      title: TITLE_OF[p.kind],
-      focus: FOCUS_OF[p.kind],
-      durationMinutes,
-      // Priced with the same function the ledger prices logged sessions with,
-      // so the planned week and the recorded week are on one scale.
-      tss: estimateSessionTss({ sport: sport as Sport, durationMinutes, rpe: rpeFor(p.kind) }, athlete),
-      intensity: INTENSITY_OF[p.kind],
-      targets: targetsFor(p.kind, athlete, durationMinutes),
-      servesGoalIds: p.goalIds,
-      note:
-        p.goalLabels.length > 1
-          ? `Serves ${p.goalLabels.join(" and ")} at once — one session, both goals.`
-          : `For ${p.goalLabels[0]}.`,
-    };
+    const n = (kindSeen.get(p.kind) ?? 0) + 1;
+    kindSeen.set(p.kind, n);
+    return buildSession(p.kind, dates[i]!, minutesFor(p.kind), athlete, p.goalIds, p.goalLabels, {
+      occurrence: { n, of: kindTotals.get(p.kind)! },
+    });
   });
 
   sessions.sort((a, b) => a.date.localeCompare(b.date));
@@ -346,25 +431,7 @@ export function prescribeWeek(week: ArbitratedWeek, goals: Goal[], athlete: Athl
     totalMinutes: sessions.reduce((s, x) => s + x.durationMinutes, 0),
     totalTss: sessions.reduce((s, x) => s + x.tss, 0),
     loadMultiplier: week.loadMultiplier,
+    phaseName,
     note: shape.focus,
   };
-}
-
-function clampKind(kind: SessionKind, minutes: number): number {
-  const bounds = KIND_MINUTES[kind];
-  return Math.min(bounds.max, Math.max(bounds.min, minutes));
-}
-
-/** RPE the session is prescribed AT, which is what prices its planned TSS. */
-function rpeFor(kind: SessionKind): number {
-  switch (INTENSITY_OF[kind]) {
-    case "hard":
-      return 8;
-    case "moderate":
-      return 6;
-    case "easy":
-      return 4;
-    default:
-      return 1;
-  }
 }

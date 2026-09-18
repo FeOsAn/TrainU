@@ -93,6 +93,11 @@ function inferredFromGoals(block: Block, goals: Goal[], connectors: ConnectorPre
   if (block.requiresFeature && !features[block.requiresFeature]) return false;
   if (block.requiresConnector && !connectors[block.requiresConnector]) return false;
   if (block.goalTypes === "*") return true;
+  // A stated fact about the athlete's life can imply a block their goals
+  // don't. "I own a bike" is not a goal and never will be, but it decides
+  // whether an injury substitute is possible — and whether the FTP that
+  // prices it is a number they can see and correct.
+  if (block.enabledByFeature?.some((feature) => features[feature])) return true;
 
   const types = block.goalTypes;
   return goals.some((goal) => {
@@ -211,7 +216,13 @@ export function assembleApp(
       return {
         capability,
         label: CAPABILITY_LABELS[capability],
-        wantedBy: labels,
+        // Sorted, because otherwise this list is in the order the goals
+        // happened to be created in — and assembly has to depend on the goal
+        // MODEL, not on the order someone typed it in. Nothing was wrong
+        // until two goals wanted the same missing capability, which is
+        // exactly the sort of latent order-dependence the determinism test
+        // exists to catch.
+        wantedBy: [...labels].sort(),
         ...(planned ? { plannedBlockId: planned.id, ...(planned.note ? { note: planned.note } : {}) } : {}),
       };
     })

@@ -7,6 +7,8 @@
 
 import type { Goal } from "../goal";
 import type { AthleteParams } from "../athlete";
+import type { GoalRisk } from "../conditions";
+import { weeksUntil } from "../dates";
 import { predictBodyComposition } from "../predictors/bodyComposition";
 
 export type NutritionStance = "surplus" | "maintenance" | "deficit";
@@ -27,10 +29,18 @@ export interface GoalPhase {
    * falling back to a stock "20% cut".
    */
   requiredWeeklyChangeKg?: number | null;
-}
-
-function weeksUntil(fromDate: string, targetDate: string): number {
-  return (Date.parse(`${targetDate}T00:00:00Z`) - Date.parse(`${fromDate}T00:00:00Z`)) / (7 * 86_400_000);
+  /**
+   * What an open injury or illness is doing to this goal's chances.
+   *
+   * Set by the conditions feature, never by `phaseForGoal` — a condition
+   * changes nothing about what the goal WANTS this week, only about what has
+   * actually been possible. Keeping it as an annotation rather than folding
+   * it into `loadMultiplier` is deliberate: the arbitrated numbers stay
+   * provably independent of the athlete's health state, and the honest
+   * consequence (a wider prediction band, a warning under the goal) is
+   * surfaced instead of being silently baked into a plan.
+   */
+  risk?: GoalRisk;
 }
 
 function base(goal: Goal): Pick<GoalPhase, "goalId" | "goalLabel" | "goalType"> {
