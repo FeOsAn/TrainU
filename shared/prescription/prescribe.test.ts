@@ -2,9 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULT_ATHLETE } from "../athlete";
 import { measured } from "../measured";
-import type { Goal } from "../goal";
+import { DISCIPLINES, type Discipline, type Goal, type GoalType } from "../goal";
 import { arbitrateWeek } from "../arbitration/arbitrate";
-import { prescribeWeek } from "./prescribe";
+import { prescribeWeek, splitOccurrences } from "./prescribe";
+import { SESSION_KINDS, type SessionKind } from "./sessionKinds";
+import { GOAL_QUALITIES, KIND_MINUTES, OCCURRENCE_SHARES, qualitiesFor } from "./templates";
 
 const MONDAY = "2026-09-14";
 
@@ -224,4 +226,220 @@ test("a triathlon goal and a body-composition goal still merge into one week", (
   assert.ok(w.sessions.length <= 6, `six days must not produce ${w.sessions.length} sessions`);
   const sports = new Set(w.sessions.map((s) => s.sport));
   assert.ok(sports.has("bike") || sports.has("swim"), "the triathlon is the priority-1 goal; it must survive arbitration with a second goal");
+});
+
+
+// ─── Per-occurrence sizing ───────────────────────────────────────────────────
+//
+// The Phase 8 limitation this closes: minutes were allocated per KIND, so the
+// Nth session of a kind was a copy of the first and a 70.3 week came out with
+// two identical 106-minute rides. The per-kind allocation is unchanged — only
+// how that total is distributed across the kind's occurrences.
+
+test("splitting one occurrence returns the whole allocation, decaying kind or not", () => {
+  assert.deepEqual(splitOccurrences("bike_endurance", 106, 1), [106]);
+  assert.deepEqual(splitOccurrences("run_long", 93, 1), [93]);
+});
+
+test("a kind with no share table splits exactly equally — this is what keeps a runner's week unchanged", () => {
+  assert.deepEqual(splitOccurrences("run_easy", 156, 3), [52, 52, 52]);
+  assert.deepEqual(splitOccurrences("run_threshold", 120, 2), [60, 60]);
+});
+
+test("an endurance kind decays, and the kind's total is conserved to the minute", () => {
+  const two = splitOccurrences("bike_endurance", 212, 2);
+  assert.deepEqual(two, [128, 84]);
+  assert.equal(two.reduce((a, b) => a + b, 0), 212, "redistributed, never reduced");
+
+  const three = splitOccurrences("bike_endurance", 225, 3);
+  assert.deepEqual(three, [105, 68, 52]);
+  assert.equal(three.reduce((a, b) => a + b, 0), 225);
+});
+
+test("a ceiling redistributes the overflow instead of deleting it", () => {
+  // The plausible-but-wrong version of this caps the first occurrence and
+  // walks away, silently removing 27 minutes of swimming from the week.
+  const split = splitOccurrences("swim_technique", 219, 3);
+  assert.deepEqual(split, [75, 75, 69]);
+  assert.equal(split.reduce((a, b) => a + b, 0), 219, "the cap must move minutes, not destroy them");
+  for (const minutes of split) assert.ok(minutes <= KIND_MINUTES.swim_technique.max);
+});
+
+test("a floor is paid for out of the long one, and everything at its ceiling stays there", () => {
+  const floored = splitOccurrences("swim_technique", 90, 3);
+  assert.deepEqual(floored, [30, 30, 30]);
+  assert.equal(floored.reduce((a, b) => a + b, 0), 90);
+  for (const minutes of floored) assert.ok(minutes >= KIND_MINUTES.swim_technique.min);
+
+  assert.deepEqual(splitOccurrences("bike_endurance", 480, 2), [240, 240]);
+});
+
+test("the fourth occurrence and beyond repeat the last share", () => {
+  const split = splitOccurrences("bike_endurance", 400, 4);
+  assert.deepEqual(split, [152, 98, 75, 75]);
+  assert.equal(split.reduce((a, b) => a + b, 0), 400);
+  for (let i = 1; i < split.length; i++) assert.ok(split[i]! <= split[i - 1]!, "a later occurrence is never longer than an earlier one");
+});
+
+test("a marathon week is byte-identical to what it was before occurrences were sized", () => {
+  // The invariant the whole change is held to: a runner's week must not move
+  // by a single minute or a single day.
+  const base = prescribe([goal({ id: "race" })], DEFAULT_ATHLETE, 5);
+  assert.deepEqual(
+    base.sessions.map((s) => [s.date, s.kind, s.durationMinutes, s.tss]),
+    [
+      ["2026-09-14", "run_easy", 52, 28],
+      ["2026-09-15", "run_threshold", 52, 93],
+      ["2026-09-16", "run_easy", 52, 28],
+      ["2026-09-18", "run_easy", 52, 28],
+      ["2026-09-19", "run_long", 93, 114],
+    ],
+  );
+  assert.equal(base.totalMinutes, 301);
+  assert.equal(base.totalTss, 291);
+
+  const build = prescribe([goal({ id: "race", targetDate: "2026-11-15" })], DEFAULT_ATHLETE, 5);
+  assert.deepEqual(
+    build.sessions.map((s) => [s.date, s.kind, s.durationMinutes, s.tss]),
+    [
+      ["2026-09-14", "run_easy", 61, 33],
+      ["2026-09-15", "run_threshold", 61, 109],
+      ["2026-09-16", "run_easy", 61, 33],
+      ["2026-09-17", "run_intervals", 54, 96],
+      ["2026-09-19", "run_long", 109, 133],
+    ],
+  );
+  assert.equal(build.totalMinutes, 346);
+  assert.equal(build.totalTss, 404);
+});
+
+test("three easy runs in a runner's week stay three equal easy runs", () => {
+  const w = prescribe([goal({ id: "race" })], DEFAULT_ATHLETE, 5);
+  const easy = w.sessions.filter((s) => s.kind === "run_easy");
+  assert.equal(easy.length, 3);
+  assert.equal(new Set(easy.map((s) => s.durationMinutes)).size, 1, "easy runs do not decay — a goal asking for three means three of the same");
+  assert.deepEqual(easy.map((s) => s.occurrence), [{ n: 1, of: 3 }, { n: 2, of: 3 }, { n: 3, of: 3 }]);
+});
+
+test("a triathlon week gets one long weekend ride and one shorter midweek ride, same bike total", () => {
+  // Before: two identical 106-minute rides, one on Monday and one on Sunday.
+  const w = prescribe([goal({ discipline: "triathlon", label: "Ironman 70.3" })], DEFAULT_ATHLETE, 6);
+  const rides = w.sessions.filter((s) => s.kind === "bike_endurance");
+  assert.equal(rides.length, 2);
+
+  const long = rides.find((s) => s.occurrence!.n === 1)!;
+  const short = rides.find((s) => s.occurrence!.n === 2)!;
+  assert.equal(long.durationMinutes, 128);
+  assert.equal(short.durationMinutes, 84);
+  assert.equal(long.durationMinutes + short.durationMinutes, 212, "the bike's weekly volume is redistributed, not reduced");
+  assert.equal(long.date, "2026-09-20", "the long ride takes the weekend, not the first free Monday slot");
+
+  // The rest of the week is untouched by the split.
+  assert.equal(w.totalMinutes, 374);
+  assert.equal(w.totalTss, 289);
+  assert.equal(w.sessions.find((s) => s.kind === "run_long")!.durationMinutes, 53);
+  assert.equal(w.sessions.find((s) => s.kind === "swim_technique")!.durationMinutes, 39);
+});
+
+test("the athlete is told why two rides are different lengths", () => {
+  const w = prescribe([goal({ discipline: "triathlon", label: "Ironman 70.3" })], DEFAULT_ATHLETE, 6);
+  const rides = w.sessions.filter((s) => s.kind === "bike_endurance");
+  const long = rides.find((s) => s.occurrence!.n === 1)!;
+  const short = rides.find((s) => s.occurrence!.n === 2)!;
+  assert.match(long.note, /long ride/, "an unexplained 128 vs 84 reads as a bug, not a plan");
+  assert.match(short.note, /Sunday/, "the short one names the day the long one is on");
+  for (const session of w.sessions) {
+    for (const kind of SESSION_KINDS) assert.ok(!session.note.includes(kind), `an identifier reached the athlete: ${session.note}`);
+  }
+});
+
+test("a flattened split explains nothing rather than claiming a distinction the minutes contradict", () => {
+  // The swim ceiling binds at 75 min, so this week is 75 / 75 / 69: there is
+  // no "long one" to point at.
+  const w = prescribe([goal({ discipline: "swimming" })], DEFAULT_ATHLETE, 5);
+  const swims = w.sessions.filter((s) => s.kind === "swim_technique");
+  assert.deepEqual(swims.map((s) => s.durationMinutes).sort((a, b) => b - a), [75, 75, 69]);
+  for (const swim of swims) assert.ok(!/shorter|long swim/i.test(swim.note), `claimed a long/short split that isn't there: ${swim.note}`);
+});
+
+test("every discipline's week conserves the minutes it had before, kind by kind", () => {
+  const cases: Array<{ discipline: Discipline; days: number; totalMinutes: number; perKind: Partial<Record<SessionKind, number>> }> = [
+    { discipline: "triathlon", days: 6, totalMinutes: 374, perKind: { bike_endurance: 212, swim_technique: 39, run_long: 53 } },
+    { discipline: "triathlon", days: 7, totalMinutes: 432, perKind: { bike_endurance: 224, swim_technique: 82 } },
+    { discipline: "cycling", days: 5, totalMinutes: 305, perKind: { bike_endurance: 225 } },
+    { discipline: "swimming", days: 5, totalMinutes: 299, perKind: { swim_technique: 219 } },
+  ];
+  for (const { discipline, days, totalMinutes, perKind } of cases) {
+    const w = prescribe([goal({ discipline })], DEFAULT_ATHLETE, days);
+    assert.equal(w.totalMinutes, totalMinutes, `${discipline} ${days}-day week changed size`);
+    for (const [kind, expected] of Object.entries(perKind)) {
+      const sum = w.sessions.filter((s) => s.kind === kind).reduce((total, s) => total + s.durationMinutes, 0);
+      assert.equal(sum, expected, `${discipline} ${days}-day: ${kind} volume moved`);
+    }
+  }
+});
+
+test("the first occurrence IS the anchor — longest and on the weekend", () => {
+  const tri = prescribe([goal({ discipline: "triathlon" })], DEFAULT_ATHLETE, 6);
+  const triAnchor = tri.sessions.find((s) => s.kind === "bike_endurance" && s.occurrence!.n === 1)!;
+  for (const other of tri.sessions.filter((s) => s !== triAnchor && s.sport !== "strength")) {
+    assert.ok(triAnchor.durationMinutes > other.durationMinutes, `the anchor (${triAnchor.durationMinutes}) should outlast ${other.kind} (${other.durationMinutes})`);
+  }
+  const triLongRun = tri.sessions.find((s) => s.kind === "run_long")!;
+  assert.equal(triLongRun.date, "2026-09-19", "the long run keeps Saturday; the long ride takes Sunday");
+  for (const run of tri.sessions.filter((s) => s.sport === "run" && s.kind !== "run_long")) {
+    assert.ok(triLongRun.durationMinutes > run.durationMinutes, "the long run still outlasts every other run");
+  }
+
+  const cycling = prescribe([goal({ discipline: "cycling" })], DEFAULT_ATHLETE, 5);
+  const cyclingAnchor = cycling.sessions.find((s) => s.occurrence!.n === 1 && s.kind === "bike_endurance")!;
+  assert.equal(cyclingAnchor.date, "2026-09-19", "with no long run in the week the anchor takes Saturday itself");
+  for (const other of cycling.sessions.filter((s) => s !== cyclingAnchor && s.sport !== "strength")) {
+    assert.ok(cyclingAnchor.durationMinutes > other.durationMinutes);
+  }
+});
+
+test("a dead goal changes neither the occurrence count nor the split", () => {
+  // The Phase 3 archetype, re-pinned one layer down: a past goal's three bike
+  // demands must not add a ride or re-split the ones that exist.
+  const live = goal({ id: "tri", discipline: "triathlon" });
+  const dead = goal({ id: "old", discipline: "cycling", targetDate: "2020-01-01" });
+  assert.deepEqual(prescribe([live, dead], DEFAULT_ATHLETE, 6), prescribe([live], DEFAULT_ATHLETE, 6));
+});
+
+test("a session serving two goals is split the same as one serving one", () => {
+  const tri = goal({ id: "tri", discipline: "triathlon", label: "Ironman 70.3", priority: 1 });
+  const cyc = goal({ id: "cyc", discipline: "cycling", label: "Gran fondo", priority: 2 });
+  const merged = prescribe([tri, cyc], DEFAULT_ATHLETE, 6);
+  const rides = merged.sessions.filter((s) => s.kind === "bike_endurance");
+  assert.ok(rides.every((s) => s.servesGoalIds.length === 2), "both goals want rides; they should share them");
+  assert.deepEqual(
+    rides.map((s) => s.durationMinutes).sort((a, b) => b - a),
+    prescribe([tri], DEFAULT_ATHLETE, 6).sessions.filter((s) => s.kind === "bike_endurance").map((s) => s.durationMinutes).sort((a, b) => b - a),
+    "who a session serves must not change how long it is",
+  );
+});
+
+test("every kind that decays is a kind some goal can actually ask for twice", () => {
+  /*
+   * The Phase 8 catalog-integrity archetype, applied to this table. A share
+   * entry for a kind no quality list contains twice — `run_long`, say, which
+   * appears once everywhere and merges across goals — is capability nothing
+   * can request: it would read as built, be tested in isolation, and never
+   * run. Adding one fails here.
+   */
+  const disciplines: Array<Discipline | undefined> = [undefined, ...DISCIPLINES];
+  for (const kind of Object.keys(OCCURRENCE_SHARES) as SessionKind[]) {
+    const reachable = (Object.keys(GOAL_QUALITIES) as GoalType[]).some((type) =>
+      disciplines.some((discipline) => qualitiesFor(type, discipline).filter((k) => k === kind).length >= 2),
+    );
+    assert.ok(reachable, `${kind} decays across occurrences, but no goal can ever ask for two of them`);
+  }
+});
+
+test("prescribing a week never writes to the athlete's measured values", () => {
+  const athlete = structuredClone(DEFAULT_ATHLETE);
+  const before = structuredClone(DEFAULT_ATHLETE);
+  prescribe([goal({ discipline: "triathlon" })], athlete, 6);
+  assert.deepEqual(athlete, before, "the allocator reads Measured values; it must never mutate one");
 });

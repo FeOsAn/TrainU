@@ -202,6 +202,41 @@ export const KIND_MINUTES: Record<SessionKind, { min: number; max: number }> = {
   rest: { min: 0, max: 0 },
 };
 
+/**
+ * Share of a kind's weekly minutes the Nth occurrence gets, index 0 = the
+ * first (the anchor). Beyond the table the last value repeats. A kind that
+ * is ABSENT here splits its total equally — a runner's three easy runs are
+ * meant to be three equal easy runs, and that is exactly what they were
+ * before per-occurrence sizing existed.
+ *
+ * Only the endurance kinds decay, because only they have a real long/short
+ * distinction: a week with two rides means one long weekend ride and one
+ * shorter midweek ride, not the same ride twice, which is what sizing per
+ * KIND produced (two 106-minute rides in a 70.3 week).
+ *
+ * `run_long` is deliberately absent and must stay absent. No quality list
+ * contains it twice and cross-goal duplicates merge into one session, so an
+ * entry here would be capability nothing can request — the Phase 8
+ * archetype. A catalog-integrity test fails the suite if anyone adds a kind
+ * no goal can ask for twice.
+ */
+export const OCCURRENCE_SHARES: Partial<Record<SessionKind, readonly number[]>> = {
+  bike_endurance: [1, 0.65, 0.5],
+  swim_technique: [1, 0.65, 0.5],
+};
+
+/**
+ * The share the Nth occurrence (1-based) of this kind gets, 1 when the kind
+ * does not decay. One lookup, for the same reason `kindWeight` is one: a
+ * share honoured in the allocator and missed in a test is a split nobody
+ * can reproduce.
+ */
+export function occurrenceShare(kind: SessionKind, n: number): number {
+  const shares = OCCURRENCE_SHARES[kind];
+  if (!shares || shares.length === 0) return 1;
+  return shares[Math.min(Math.max(1, Math.round(n)), shares.length) - 1]!;
+}
+
 /** Kinds above a phase's ceiling get downgraded to this, rather than dropped — the slot still has training value. */
 export const DOWNGRADE: Partial<Record<SessionKind, SessionKind>> = {
   run_intervals: "run_threshold",

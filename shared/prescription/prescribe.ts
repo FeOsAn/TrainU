@@ -20,7 +20,7 @@ import { type Goal, defaultDiscipline } from "../goal";
 import type { ArbitratedWeek } from "../arbitration/arbitrate";
 import { estimateSessionTss } from "../trainingLoad";
 import type { Sport } from "../session";
-import { addDays } from "../dates";
+import { WEEKDAY_LABELS, addDays, weekdayOf } from "../dates";
 import {
   ANCHOR_KIND,
   BASELINE_MINUTES_PER_DAY,
@@ -36,10 +36,11 @@ import {
   applyCeiling,
   clampKind,
   kindWeight,
+  occurrenceShare,
   qualitiesFor,
   rpeFor,
 } from "./templates";
-import type { AdjustedFrom, PlannedSession, PrescribedWeek, SessionKind, SessionOccurrence } from "./sessionKinds";
+import type { AdjustedFrom, PlannedSession, PlannedSport, PrescribedWeek, SessionKind, SessionOccurrence } from "./sessionKinds";
 
 // FRESH_KM_TO_THRESHOLD / FRESH_KM_TO_INTERVAL live in shared/athlete.ts,
 // next to the field they convert — see the note there about the predictor
@@ -129,6 +130,48 @@ function targetsFor(kind: SessionKind, athlete: AthleteParams, minutes: number):
   }
 }
 
+/**
+ * What the athlete calls a session of this sport, in a sentence. A label
+ * table rather than a switch so a new sport fails `tsc` until it has words
+ * the athlete would use — no identifier ever reaches a card.
+ */
+const SPORT_NOUN: Record<PlannedSport, string> = {
+  run: "run",
+  bike: "ride",
+  swim: "swim",
+  strength: "lift",
+  hybrid: "session",
+  station: "session",
+  other: "session",
+};
+
+/**
+ * Why two sessions of the same kind in one week are different lengths.
+ *
+ * Without this the athlete sees a 128-minute ride and an 84-minute ride with
+ * identical targets and no stated reason, which reads as a bug rather than
+ * as a plan. Decided from the split's OWN numbers instead of from whether
+ * the kind decays in principle: when a ceiling flattens a split into three
+ * near-equal swims, calling one of them "shorter" would be a sentence the
+ * numbers contradict.
+ */
+function occurrenceNote(kind: SessionKind, occurrence: SessionOccurrence, split: number[], longDate: string): string | null {
+  if (occurrence.of < 2 || split.length < 2) return null;
+  const first = split[0]!;
+  // Only when the first occurrence is strictly the longest. A ceiling can
+  // flatten a split into two equal swims and a shorter one, and then there
+  // is no "long one" to point at — so the plan says nothing rather than
+  // something the minutes on the card contradict.
+  if (first <= Math.max(...split.slice(1))) return null;
+  const noun = SPORT_NOUN[SPORT_OF[kind]];
+  if (occurrence.n === 1) {
+    return occurrence.of === 2
+      ? `The week's long ${noun} — the other one is shorter on purpose.`
+      : `The week's long ${noun} — the others are shorter on purpose.`;
+  }
+  return `Shorter ${noun} (${occurrence.n} of ${occurrence.of}) — the long one is on ${WEEKDAY_LABELS[weekdayOf(longDate)]}.`;
+}
+
 export interface AssignDatesOptions {
   /**
    * The kind that gets the week's protected weekend slot. Defaults to
@@ -190,13 +233,34 @@ function assignDates(weekStart: string, kinds: SessionKind[], options: AssignDat
     claim(i, rawOffset);
   }
 
-  // 2. The anchor takes the latest legal day, preferring the weekend.
-  const anchorIndex = kinds.findIndex((kind, i) => kind === anchorKind && offsets[i] === undefined);
-  if (anchorIndex >= 0) {
-    const preference = [5, 6, ...[4, 3, 2, 1, 0]];
+  /*
+   * 2. The weekend pins, and ONLY the first occurrence of each.
+   *
+   * The long run goes first, then the discipline's anchor — for a runner
+   * those are the same session, so a runner's week comes out exactly as it
+   * always did. For a triathlete the long run takes Saturday and the long
+   * ride takes Sunday, instead of the ride landing in the first free Monday
+   * slot because nothing had ever pinned it.
+   *
+   * FIRST occurrence only: pinning every session of a kind would put two
+   * rides on the same day, and two sessions sharing a (date, kind) share a
+   * completion key — ticking one would tick both.
+   *
+   * `allowed` is honoured throughout, because the athlete's statement about
+   * which days exist outranks the engine's opinion about which day is
+   * nicest for a long session. The weekend is a preference; the training
+   * days are a constraint. With no Saturday or Sunday available this walks
+   * back to the latest day that is.
+   */
+  const preference = [5, 6, 4, 3, 2, 1, 0];
+  const pinFirst = (kind: SessionKind) => {
+    const index = kinds.findIndex((k, i) => k === kind && offsets[i] === undefined);
+    if (index < 0) return;
     const slot = preference.find((d) => allowed.has(d) && !taken.has(d));
-    if (slot !== undefined) claim(anchorIndex, slot);
-  }
+    if (slot !== undefined) claim(index, slot);
+  };
+  pinFirst("run_long");
+  if (anchorKind !== "run_long") pinFirst(anchorKind);
 
   // 3. Everything else spreads, hard sessions first-choice on alternating days.
   kinds.forEach((kind, i) => {
@@ -225,6 +289,76 @@ function assignDates(weekStart: string, kinds: SessionKind[], options: AssignDat
   });
 
   return offsets.map((o) => addDays(weekStart, o));
+}
+
+/**
+ * Split ONE kind's weekly minutes across its occurrences.
+ *
+ * The per-kind allocation above is unchanged — this only decides how that
+ * total is shared out. A kind with no entry in `OCCURRENCE_SHARES` splits
+ * equally, which is bit-for-bit what every kind got before this existed, so
+ * a runner's three easy runs stay three equal easy runs. The endurance kinds
+ * decay (1 / 0.65 / 0.5, last value repeating), which is the difference
+ * between "two rides" and "one long weekend ride and one shorter midweek
+ * one" — the thing a week sized per KIND could not say.
+ *
+ * VOLUME IS REDISTRIBUTED, NEVER REDUCED. The total comes back out equal to
+ * what went in, so decaying a kind can't quietly delete training: the only
+ * way minutes are lost is if every occurrence is already at its ceiling,
+ * which is the bound that existed before and not a new one.
+ *
+ * The bounds are enforced by iterating to a FIXED POINT rather than by one
+ * pass of water-filling. A single directional pass can leave the total
+ * wrong: raising a short occurrence to its floor takes minutes from the
+ * first, which can then itself need capping, which puts minutes back — and
+ * a pass that has already run does not see them. Clamp, measure the
+ * residual, hand it to whoever has headroom in share order, repeat.
+ */
+export function splitOccurrences(kind: SessionKind, total: number, count: number): number[] {
+  if (count <= 0) return [];
+  if (count === 1) return [total];
+
+  const { min, max } = KIND_MINUTES[kind];
+  const weights = Array.from({ length: count }, (_, i) => occurrenceShare(kind, i + 1));
+  const weightSum = weights.reduce((a, b) => a + b, 0);
+
+  // Later occurrences round; the first takes the remainder, so the sum is
+  // exact before the bounds are applied rather than off by a minute or two.
+  const out = weights.map((w, i) => (i === 0 ? 0 : Math.round((total * w) / weightSum)));
+  out[0] = total - out.slice(1).reduce((a, b) => a + b, 0);
+
+  for (let pass = 0; pass <= count + 2; pass++) {
+    // Positive residual = minutes taken off a capped occurrence, looking for
+    // somewhere to go. Negative = minutes lent to an occurrence below its
+    // floor, owed by whoever still has room above theirs.
+    let residual = 0;
+    for (let i = 0; i < count; i++) {
+      if (out[i]! > max) {
+        residual += out[i]! - max;
+        out[i] = max;
+      } else if (out[i]! < min) {
+        residual -= min - out[i]!;
+        out[i] = min;
+      }
+    }
+    if (residual === 0) return out;
+
+    let moved = 0;
+    for (let i = 0; i < count && residual !== 0; i++) {
+      // Share order: the long one absorbs a surplus first and pays a
+      // shortfall first, so the decay shape survives the correction.
+      const headroom = residual > 0 ? max - out[i]! : -(out[i]! - min);
+      const step = residual > 0 ? Math.min(residual, headroom) : Math.max(residual, headroom);
+      if (step === 0) continue;
+      out[i] = out[i]! + step;
+      residual -= step;
+      moved += Math.abs(step);
+    }
+    // Nobody has room left: the week is at its ceiling (or its floor) and
+    // the remainder is the bound doing its job, not an arithmetic slip.
+    if (moved === 0) return out;
+  }
+  return out;
 }
 
 export interface BuildSessionOptions {
@@ -373,6 +507,46 @@ export function prescribeWeek(week: ArbitratedWeek, goals: Goal[], athlete: Athl
   }
 
   /*
+   * ── Per-occurrence sizing ────────────────────────────────────────────
+   *
+   * The allocation above is per KIND, which is why a 70.3 week used to come
+   * out with two identical 106-minute rides. A real week has one long
+   * weekend ride and a shorter midweek one; sizing per kind cannot say that.
+   *
+   * So the per-kind total is kept EXACTLY as computed, and only its
+   * distribution changes: `splitOccurrences` hands the kind's whole
+   * allocation (count x per-kind minutes) back out across its occurrences.
+   * Kinds with no share table split equally, which is what every kind got
+   * before — a runner's week is unchanged to the minute.
+   *
+   * Which occurrence a slot is comes from ALLOCATION order, not date order:
+   * the first occurrence is the one the priority ordering asked for first,
+   * and it is the one the weekend pin and the dominance rules act on. It is
+   * therefore the anchor by construction rather than by inference from
+   * minutes.
+   */
+  const kindTotals = new Map<SessionKind, number>();
+  for (const p of picked) kindTotals.set(p.kind, (kindTotals.get(p.kind) ?? 0) + 1);
+  const kindSeen = new Map<SessionKind, number>();
+  const occurrences: SessionOccurrence[] = picked.map((p) => {
+    const n = (kindSeen.get(p.kind) ?? 0) + 1;
+    kindSeen.set(p.kind, n);
+    return { n, of: kindTotals.get(p.kind)! };
+  });
+
+  const splits = new Map<SessionKind, number[]>();
+  for (const [kind, count] of kindTotals) {
+    if (STRENGTH_KINDS.has(kind)) continue;
+    const perKind = minutes.get(kind) ?? KIND_MINUTES[kind].min;
+    splits.set(kind, splitOccurrences(kind, perKind * count, count));
+  }
+
+  // A lift is ~50 minutes however the aerobic week falls, as before.
+  const minutesAt: number[] = picked.map((p, i) =>
+    STRENGTH_KINDS.has(p.kind) ? STRENGTH_MINUTES : (splits.get(p.kind)?.[occurrences[i]!.n - 1] ?? KIND_MINUTES[p.kind].min),
+  );
+
+  /*
    * Two dominance rules, because "biggest run" and "biggest session" are the
    * same thing for a runner and different things for a triathlete.
    *
@@ -380,47 +554,45 @@ export function prescribeWeek(week: ArbitratedWeek, goals: Goal[], athlete: Athl
    * means that fixing the bike's share of a triathlon week gets immediately
    * undone: the long run is pushed back above the ride it was just meant to
    * sit beneath.
+   *
+   * Both now act on the FIRST OCCURRENCE rather than on the kind: raising
+   * "the ride" when a week has two of them would raise the short midweek one
+   * along with the long one, which is the opposite of what the rule means.
    */
+  const firstIndexOf = (kind: SessionKind) => picked.findIndex((p) => p.kind === kind);
   const biggestExcept = (except: SessionKind, within?: (k: SessionKind) => boolean) =>
-    Math.max(0, ...aerobicKinds.filter((k) => k !== except && (within?.(k) ?? true)).map((k) => minutes.get(k) ?? 0));
+    Math.max(
+      0,
+      ...picked.map((p, i) => (p.kind !== except && !STRENGTH_KINDS.has(p.kind) && (within?.(p.kind) ?? true) ? minutesAt[i]! : 0)),
+    );
 
   // 1. The long run outlasts every other RUN — never shorter than an easy run.
-  const longMinutes = minutes.get("run_long");
-  if (longMinutes != null) {
+  const longIndex = firstIndexOf("run_long");
+  if (longIndex >= 0) {
     const biggestOtherRun = biggestExcept("run_long", (k) => SPORT_OF[k] === "run");
-    if (longMinutes <= biggestOtherRun) {
-      minutes.set("run_long", clampKind("run_long", Math.round(biggestOtherRun * 1.25)));
+    if (minutesAt[longIndex]! <= biggestOtherRun) {
+      minutesAt[longIndex] = clampKind("run_long", Math.round(biggestOtherRun * 1.25));
     }
   }
 
   // 2. The discipline's anchor outlasts everything. For a runner this is the
   //    long run again, so rule 1's result stands and nothing changes.
   const anchorKind = ANCHOR_KIND[discipline] ?? "run_long";
-  const anchorMinutes = minutes.get(anchorKind);
-  if (anchorMinutes != null) {
+  const anchorIndex = STRENGTH_KINDS.has(anchorKind) ? -1 : firstIndexOf(anchorKind);
+  if (anchorIndex >= 0) {
     const biggestOther = biggestExcept(anchorKind);
-    if (anchorMinutes <= biggestOther) {
-      minutes.set(anchorKind, clampKind(anchorKind, Math.round(biggestOther * 1.25)));
+    if (minutesAt[anchorIndex]! <= biggestOther) {
+      minutesAt[anchorIndex] = clampKind(anchorKind, Math.round(biggestOther * 1.25));
     }
   }
 
-  const minutesFor = (kind: SessionKind): number => (STRENGTH_KINDS.has(kind) ? STRENGTH_MINUTES : (minutes.get(kind) ?? KIND_MINUTES[kind].min));
-
-  const dates = assignDates(week.date, picked.map((p) => p.kind));
-
-  // Which of N sessions of this kind each one is, in allocation order. The
-  // sizing is still equal per kind; this only records the position, so a
-  // later layer can tell the week's second ride from its anchor.
-  const kindTotals = new Map<SessionKind, number>();
-  for (const p of picked) kindTotals.set(p.kind, (kindTotals.get(p.kind) ?? 0) + 1);
-  const kindSeen = new Map<SessionKind, number>();
+  const dates = assignDates(week.date, picked.map((p) => p.kind), { anchorKind });
 
   const sessions: PlannedSession[] = picked.map((p, i) => {
-    const n = (kindSeen.get(p.kind) ?? 0) + 1;
-    kindSeen.set(p.kind, n);
-    return buildSession(p.kind, dates[i]!, minutesFor(p.kind), athlete, p.goalIds, p.goalLabels, {
-      occurrence: { n, of: kindTotals.get(p.kind)! },
-    });
+    const occurrence = occurrences[i]!;
+    const session = buildSession(p.kind, dates[i]!, minutesAt[i]!, athlete, p.goalIds, p.goalLabels, { occurrence });
+    const sentence = occurrenceNote(p.kind, occurrence, splits.get(p.kind) ?? [], dates[firstIndexOf(p.kind)] ?? session.date);
+    return sentence ? { ...session, note: `${session.note} ${sentence}` } : session;
   });
 
   sessions.sort((a, b) => a.date.localeCompare(b.date));

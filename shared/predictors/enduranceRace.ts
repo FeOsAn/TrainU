@@ -130,8 +130,16 @@ export interface TriathlonPrediction {
   confidence: Confidence;
 }
 
-function calcBikeRacePower(ftpWatts: number): number {
-  return Math.round(ftpWatts * 0.75);
+/**
+ * Race power as a share of FTP for a long-course bike leg. Exported because
+ * the race-day pacing plan has to tell the athlete the watts to hold, and a
+ * second copy of this number living in the pacing module is how the plan and
+ * the prediction start disagreeing about the same ride.
+ */
+export const BIKE_RACE_POWER_FRACTION = 0.75;
+
+export function calcBikeRacePower(ftpWatts: number): number {
+  return Math.round(ftpWatts * BIKE_RACE_POWER_FRACTION);
 }
 
 /** Newton's method against the cycling power-balance equation (rolling resistance + aero drag). */

@@ -11,7 +11,7 @@
 
 import type { AthleteParams } from "../athlete";
 import { type Confidence, type Measured, assessConfidence, seeded, widenForConfidence } from "../measured";
-import { DEFAULT_ROXZONE_SECONDS, DEFAULT_STATION_BENCHMARKS, RACE_SEQUENCE, STATIONS, STATION_BY_ID, type StationId, type StationSpec, stationBeforeRun } from "./hyroxStations";
+import { DEFAULT_ROXZONE_SECONDS, DEFAULT_STATION_BENCHMARKS, RACE_SEQUENCE, ROXZONE_BENCHMARK_ID, STATIONS, STATION_BY_ID, type StationId, type StationSpec, stationBeforeRun } from "./hyroxStations";
 
 export const GLOBAL_DRIFT_TOTAL = 0.055;
 /** HYROX run pace relative to the fresh kilometre — roughly 5 km pace; no one runs run 1 of 8 at an all-out kilometre. */
@@ -87,7 +87,13 @@ function goalProbabilityPoint(predictedSeconds: number, goalSeconds: number): nu
 export function predictHyrox(a: AthleteParams, goalSeconds: number, roxzoneOverride?: Measured<number>, calibrationMultiplier = 1): HyroxPrediction {
   const runThreshold = a.runThresholdSecPerKm;
   const sei = a.strengthEnduranceIndex;
-  const roxzone = roxzoneOverride ?? seeded(DEFAULT_ROXZONE_SECONDS);
+  // The roxzone now has a channel that does not require a caller to know
+  // about it. It was reachable only through `roxzoneOverride`, which every
+  // real call site passed as undefined, so this number was permanently the
+  // seed no matter what the athlete had timed. An explicit override still
+  // wins (a what-if asks "what if my transitions were three minutes?"), then
+  // the athlete's own entered benchmark, then the seed.
+  const roxzone = roxzoneOverride ?? a.benchmarks[ROXZONE_BENCHMARK_ID] ?? seeded(DEFAULT_ROXZONE_SECONDS);
   const freshPace = runThreshold.value * FRESH_KM_TO_RACE;
 
   const runSplits: RunSplit[] = [];
