@@ -107,7 +107,11 @@ export const api = {
 
   plan: (from?: string, to?: string) => request<ArbitratedPlan>(`/api/plan/arbitrate${query({ from, to })}`),
 
-  week: (date?: string, daysPerWeek?: number) => request<PlanWeek>(`/api/plan/week${query({ date, daysPerWeek })}`),
+  // `today` is the athlete's local day — see todayStr. Without it the server
+  // answers in UTC and the morning check-in modulates a day that has not
+  // started yet, or one that already ended.
+  week: (date?: string, daysPerWeek?: number) =>
+    request<PlanWeek>(`/api/plan/week${query({ date, daysPerWeek, today: todayStr() })}`),
 
   /*
    * Send ONLY the field being changed. `recordCompletion` patches, so an
@@ -151,9 +155,12 @@ export const api = {
     note?: string | null;
     trainAnywayOverride?: boolean;
   }) =>
+    // The athlete's own day travels as a query param too, so the server
+    // reports what the check-in changed against the same day it recorded
+    // against — otherwise a correct check-in can come back "nothing changed".
     request<{ checkIn: CheckInRecord; readiness: import("@shared/readiness").Readiness; adjustments: CheckInRecord["adjustments"] }>(
-      "/api/check-ins",
-      { method: "POST", body: JSON.stringify(body) },
+      `/api/check-ins${query({ today: todayStr() })}`,
+      { method: "POST", body: JSON.stringify({ date: todayStr(), ...body }) },
     ),
 
   // ─── Physique ─────────────────────────────────────────────────────────
@@ -199,8 +206,20 @@ export function formatPace(secPerKm: number | null | undefined): string {
   return `${Math.floor(secPerKm / 60)}:${String(Math.round(secPerKm % 60)).padStart(2, "0")}/km`;
 }
 
+/**
+ * The athlete's own calendar day, in THEIR timezone.
+ *
+ * `toISOString()` is UTC, which made this wrong for anyone not on it: at 07:00
+ * in Sydney it still returned yesterday, so the check-in recorded against the
+ * wrong day, the "today" highlight sat on the wrong card, and the readiness
+ * slice — which only ever touches today — silently did nothing while the app
+ * said it had saved. The server bounds whatever this sends to within a day of
+ * UTC, so a wrong clock cannot move the athlete into a different week.
+ */
 export function todayStr(): string {
-  return new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
 
 export function daysUntil(dateStr: string): number {

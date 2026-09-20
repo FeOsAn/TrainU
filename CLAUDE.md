@@ -515,12 +515,30 @@ causes a support conversation.
   console errors, zero page errors, zero failed calls, and **zero enum, kind or
   block ids on screen** — the athlete reads "Can't run", never `no_running`.
 
-  **Known limitations, stated rather than discovered later**: physique photos
-  are not built (an authenticated file-serving path on a volume is its own
-  piece of work — measurements and the trend are there); the Plan page does not
-  gate on its four original blocks, which predates this phase; and the check-in
-  uses the server's UTC date, so an athlete far from UTC checking in early can
-  have the app's "today" disagree with theirs.
+  **Three follow-ups closed after the phase shipped**, all found by looking
+  rather than by a failing test:
+  - *The Plan page rendered its four original blocks unconditionally.* Phase 9
+    promised that switching a block off in "Your app" switches off what it
+    does, not just where it shows — but an athlete who turned `plan.nutrition`
+    off still got macro targets on every day card. Every section of the page
+    now goes through one `has()` gate.
+  - *Everyone's "today" was UTC, including the client's.* `todayStr()` used
+    `toISOString()`, so at 07:00 in Sydney it returned yesterday: the check-in
+    recorded against the wrong day, the "today" highlight sat on the wrong
+    card, and the readiness slice — which only ever touches today — silently
+    did nothing while the app said it had saved. The client now sends its own
+    calendar day and the server believes it within a day of UTC, which covers
+    every real timezone while keeping a wrong clock from moving the athlete
+    into a different training week.
+  - *The test suite was flaky.* `node --test` runs files in parallel and every
+    server test shares one SQLite file, so a run could fail on contention
+    rather than on a defect. Now `--test-concurrency=1`: 18s instead of 7s,
+    and stable across repeated runs. A suite you cannot trust is worth
+    nothing, which matters here because every claim in this file rests on one.
+
+  **Known limitation**: physique photos are not built — an authenticated
+  file-serving path on a volume is its own piece of work. Measurements and the
+  trend are there.
 
 ## Client
 

@@ -460,10 +460,33 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
    * to answer "what did that change?" and the only honest answer is the one
    * the week itself produces, so both go through one builder.
    */
+  /*
+   * The athlete's own calendar day, not the server's.
+   *
+   * Everything downstream keys off "today": which session the readiness slice
+   * may touch, whether a condition is open, which day card is highlighted. The
+   * server runs in UTC, so an athlete far enough east checking in at 07:00
+   * local is still on yesterday's UTC date — and their morning check-in would
+   * silently do nothing, which is the worst kind of failure: the app says it
+   * recorded something and the plan does not move.
+   *
+   * So the client sends its own date and the server believes it, but only
+   * within a day either side of UTC. That covers every real timezone (UTC-12
+   * to UTC+14) while keeping the window small enough that a bad or stale value
+   * cannot make the app time-travel into a different training week.
+   */
+  function clientToday(req: { query: Record<string, unknown> }): string {
+    const utc = todayISO();
+    const claimed = typeof req.query.today === "string" ? req.query.today : undefined;
+    if (!claimed || !isValidISODate(claimed)) return utc;
+    return claimed >= addDays(utc, -1) && claimed <= addDays(utc, 1) ? claimed : utc;
+  }
+
   app.get("/api/plan/week", (req, res) => {
-    const requested = typeof req.query.date === "string" ? req.query.date : todayISO();
+    const today = clientToday(req);
+    const requested = typeof req.query.date === "string" ? req.query.date : today;
     if (!isValidISODate(requested)) return res.status(400).json({ error: "date must be YYYY-MM-DD" });
-    res.json(buildWeek({ date: requested, daysPerWeek: parseDaysPerWeek(req.query.daysPerWeek) }));
+    res.json(buildWeek({ date: requested, today, daysPerWeek: parseDaysPerWeek(req.query.daysPerWeek) }));
   });
 
   /*
@@ -592,7 +615,7 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
       trainAnywayOverride?: boolean;
     };
     try {
-      const today = todayISO();
+      const today = clientToday(req);
       const { checkIn, readiness } = recordCheckIn({
         date: body.date ?? today,
         sleepQuality: body.sleepQuality as number,

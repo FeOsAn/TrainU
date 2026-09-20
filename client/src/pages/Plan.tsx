@@ -24,7 +24,7 @@ function ConflictCard({ conflict }: { conflict: GoalConflict }) {
   );
 }
 
-function DayCard({ day, onTick, pending }: { day: PlanDay; onTick: (session: PlanSession, patch: TickPatch) => void; pending: boolean }) {
+function DayCard({ day, onTick, pending, showNutrition }: { day: PlanDay; onTick: (session: PlanSession, patch: TickPatch) => void; pending: boolean; showNutrition: boolean }) {
   const isToday = day.date === todayStr();
   const weekday = DAY_NAMES[(new Date(`${day.date}T00:00:00Z`).getUTCDay() + 6) % 7];
 
@@ -37,12 +37,16 @@ function DayCard({ day, onTick, pending }: { day: PlanDay; onTick: (session: Pla
           </span>
           <span className="display-num" style={{ fontSize: 14 }}>{day.date}</span>
         </div>
-        <div style={{ textAlign: "right" }}>
-          <div className="display-num" style={{ fontSize: 15 }}>{day.nutrition.kcal} kcal</div>
-          <div className="tiny muted">
-            P{day.nutrition.proteinG} · F{day.nutrition.fatG} · C{day.nutrition.carbG}
+        {/* Gated with the rest of plan.nutrition — an athlete who switched
+          * macro targets off should not still get them on every day card. */}
+        {showNutrition && (
+          <div style={{ textAlign: "right" }}>
+            <div className="display-num" style={{ fontSize: 15 }}>{day.nutrition.kcal} kcal</div>
+            <div className="tiny muted">
+              P{day.nutrition.proteinG} · F{day.nutrition.fatG} · C{day.nutrition.carbG}
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {day.sessions.length === 0 && <div className="tiny muted">Rest day — adaptation happens here, not in the sessions.</div>}
@@ -99,6 +103,17 @@ export default function Plan() {
 
   const activeGoals = goals?.filter((g) => g.active) ?? [];
   const arbitrated = week?.arbitrated;
+  /*
+   * Phase 9's promise is that switching a block off in "Your app" switches off
+   * what it does, not just where it shows — one matching rule for both. Every
+   * section of this page is gated through here, including the four original
+   * blocks, which were rendering unconditionally: an athlete who switched
+   * `plan.nutrition` off still got macro targets on every day card.
+   *
+   * `undefined` means the shell has not loaded yet, and everything renders —
+   * a page that flashes empty on each load is worse than one that briefly
+   * shows a panel the athlete is about to lose.
+   */
   const has = (id: string) => planBlocks === undefined || planBlocks.includes(id);
 
   return (
@@ -142,7 +157,7 @@ export default function Plan() {
 
       {arbitrated && activeGoals.length > 0 && week && (
         <div className="panel panel-accent">
-          <div className="grid grid-3">
+          <div className={has("plan.nutrition") ? "grid grid-3" : "grid grid-2"}>
             <div>
               <div className="section-label">Load</div>
               <div className="display-num" style={{ fontSize: 22, marginTop: 4 }}>{arbitrated.loadMultiplier}×</div>
@@ -154,12 +169,14 @@ export default function Plan() {
                 * week looks like this" below, which is where it belongs.
                 */}
             </div>
-            <div>
-              <div className="section-label">Nutrition</div>
-              <div className="display-num" style={{ fontSize: 22, marginTop: 4, textTransform: "capitalize" }}>
-                {arbitrated.nutritionStance}
+            {has("plan.nutrition") && (
+              <div>
+                <div className="section-label">Nutrition</div>
+                <div className="display-num" style={{ fontSize: 22, marginTop: 4, textTransform: "capitalize" }}>
+                  {arbitrated.nutritionStance}
+                </div>
               </div>
-            </div>
+            )}
             <div>
               <div className="section-label">Week</div>
               <div className="display-num" style={{ fontSize: 22, marginTop: 4 }}>
@@ -186,15 +203,15 @@ export default function Plan() {
       {tick.error && <div className="notice notice-danger">{(tick.error as Error).message}</div>}
       {onRecord && <div className="notice notice-neutral">{onRecord}</div>}
 
-      {week?.days.map((day) => (
-        <DayCard key={day.date} day={day} pending={tick.isPending} onTick={onTick} />
+      {has("plan.week") && week?.days.map((day) => (
+        <DayCard key={day.date} day={day} pending={tick.isPending} onTick={onTick} showNutrition={has("plan.nutrition")} />
       ))}
 
-      {week && <ChangesPanel week={week as PlanWeek} pending={tick.isPending} onTick={onTick} />}
+      {has("plan.week") && week && <ChangesPanel week={week as PlanWeek} pending={tick.isPending} onTick={onTick} />}
 
       {has("plan.pacing") && <PacingPanel />}
 
-      {arbitrated && arbitrated.goalPhases.length > 0 && (
+      {has("plan.arbitration") && arbitrated && arbitrated.goalPhases.length > 0 && (
         <div className="panel">
           <div className="section-label" style={{ marginBottom: 10 }}>Why this week looks like this</div>
           {arbitrated.goalPhases.map((phase) => {
