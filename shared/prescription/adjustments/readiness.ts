@@ -53,7 +53,9 @@ import {
   type SessionChange,
   type WorkingWeek,
   adjustSessionAt,
+  answeredKindsOn,
   isAnswered,
+  isKeyAnswered,
   registerModulator,
   restDay,
 } from "../adjust";
@@ -80,6 +82,30 @@ export const SHARPNESS_PROTECTED_PHASES: ReadonlySet<string> = new Set(["taper",
  * arrives at a start line flat.
  */
 export const SHARPNESS_SHORTEN_FACTOR = 0.7;
+
+/**
+ * The shortest a sharpness-shortened session is allowed to get.
+ *
+ * Deliberately NOT `KIND_MINUTES[kind].min`, for exactly the reason
+ * `conditions.ts`'s `MIN_REDUCED_MINUTES` spells out one file over: the kind
+ * floor says how long a FULL version of that session is, and a session this
+ * rule has just taken a third off is meant to be under it.
+ *
+ * Clamping back into the kind floor did not merely soften this rule, it
+ * deleted it. `PHASE_SHAPES.taper` sizes a race week down to exactly those
+ * floors — a real taper week is `run_easy` 30, `run_threshold` 40,
+ * `run_intervals` 35, `run_long` 50, every one AT its minimum — so
+ * `clampKind` raised `round(40 × 0.7) = 28` straight back to 40, the caller
+ * saw "no smaller than before" and did nothing, and a low morning in taper
+ * produced ZERO adjustments. DECISIONS B3 was implemented and inert in the
+ * one phase it was written for, and race week is precisely when
+ * self-reported readiness is systematically worst.
+ *
+ * 25 minutes is the floor instead: short enough that the cut is real at
+ * every kind's own minimum, long enough that what is left is still a warm-up,
+ * some work at race pace and a warm-down rather than a token.
+ */
+export const SHARPNESS_MIN_MINUTES = 25;
 
 /** Every source this slice stamps. One constant so a reason and its source can never be written apart. */
 const SOURCE = "checkin" as const;
@@ -169,7 +195,7 @@ function todaysSessions(week: WorkingWeek, today: string, state: AthleteState): 
  * next to another hard session does not make the week easier — it makes it
  * worse in a way the athlete will not see coming.
  */
-function canMoveToTomorrow(week: WorkingWeek, index: number, today: string): boolean {
+function canMoveToTomorrow(week: WorkingWeek, index: number, today: string, state: AthleteState): boolean {
   const session = week.sessions[index];
   if (!session) return false;
   const tomorrow = addDays(today, 1);
@@ -180,6 +206,10 @@ function canMoveToTomorrow(week: WorkingWeek, index: number, today: string): boo
   // threshold run on top of an existing session both doubles the day and,
   // if the kinds happen to match, collides on the completion key.
   if (week.sessions.some((s) => s.date === tomorrow)) return false;
+  // …and a day the athlete has already ticked something off on is NOT free,
+  // even though `week.sessions` — which is re-derived every request — can
+  // easily no longer hold what they answered.
+  if (answeredKindsOn(state, tomorrow).length > 0) return false;
   // And the day after tomorrow must hold nothing hard.
   const dayAfter = addDays(today, 2);
   if (week.sessions.some((s) => s.date === dayAfter && isHard(s))) return false;
@@ -189,14 +219,31 @@ function canMoveToTomorrow(week: WorkingWeek, index: number, today: string): boo
   return true;
 }
 
-/** Whether a kind already sits on this date — the completion key is `(date, kind)`, so a second one would be untickable. */
-function kindTakenOn(week: WorkingWeek, date: string, kind: SessionKind, exceptIndex: number): boolean {
+/**
+ * Whether this (date, kind) slot is already spoken for — the completion key
+ * is `(date, kind)`, so a second one would be untickable.
+ *
+ * Two ways it can be taken, and the second was missing: a session on the
+ * week, OR a completion the athlete has already answered. The week is
+ * re-derived on every request and the answered one may no longer be in it,
+ * so a downgrade could land on a card the athlete had already ticked Done.
+ */
+function kindTakenOn(week: WorkingWeek, date: string, kind: SessionKind, exceptIndex: number, state: AthleteState): boolean {
+  if (isKeyAnswered(state, date, kind)) return true;
   return week.sessions.some((s, i) => i !== exceptIndex && s.date === date && s.kind === kind);
 }
 
-/** Cut a session's length, never past the floor for its kind and never upward. */
+/**
+ * Cut a session's length, never below `SHARPNESS_MIN_MINUTES` and never
+ * upward.
+ *
+ * No `clampKind` here on purpose — see `SHARPNESS_MIN_MINUTES`. Its maximum
+ * is irrelevant (this number only ever decreases) and its minimum is the
+ * exact value a taper week has already arrived at, so applying it made the
+ * whole rule a no-op.
+ */
 function shortenedMinutes(session: PlannedSession): number {
-  const target = clampKind(session.kind, Math.round(session.durationMinutes * SHARPNESS_SHORTEN_FACTOR));
+  const target = Math.max(SHARPNESS_MIN_MINUTES, Math.round(session.durationMinutes * SHARPNESS_SHORTEN_FACTOR));
   return Math.min(session.durationMinutes, target);
 }
 
@@ -205,10 +252,41 @@ function change(reason: string): SessionChange {
 }
 
 /**
- * In taper or peak: keep the session, take the volume off it.
+ * Why a session is being shortened instead of changed, in the athlete's
+ * words.
  *
- * Returns false when there is nothing honest to do — a session already at
- * the floor for its kind gets left alone rather than "adjusted" by zero
+ * Passed in rather than baked into `shortenForSharpness`, because that
+ * function has two callers with two different reasons. It used to say "This
+ * is race week" unconditionally — and `downgradeToday` falls back into it in
+ * a BASE week whenever the easy version of a kind is already on today, so a
+ * runner in February was told it was race week.
+ */
+interface ShortenFraming {
+  /** Leads into "the threshold run keeps its kind and its pace…". Ends without punctuation. */
+  because: string;
+  /** The closing sentence: what shortening buys them. */
+  close: string;
+}
+
+/** Taper and peak: the kind is the point, so the clock gives instead. */
+const RACE_WEEK_FRAMING: ShortenFraming = {
+  because: "This is race week, so",
+  close:
+    "Fewer reps, same speed — sharpness is the one thing you cannot get back before the start line, and feeling flat " +
+    "in a taper is normal rather than a reason to train easy.",
+};
+
+/** Outside taper and peak: shortening is the fallback when there was no easier version to drop to. */
+const NO_EASIER_VERSION_FRAMING: ShortenFraming = {
+  because: "There is no easier version of it left to drop to that today does not already hold, so",
+  close: "Less of the same work still costs a lot less to recover from than the whole session would have.",
+};
+
+/**
+ * Keep the session, take the volume off it.
+ *
+ * Returns false when there is nothing honest to do — a session already at or
+ * under `SHARPNESS_MIN_MINUTES` is left alone rather than "adjusted" by zero
  * minutes, which would put a change in the athlete's changelog that did not
  * happen.
  */
@@ -217,6 +295,7 @@ function shortenForSharpness(
   index: number,
   state: AthleteState,
   opener: string,
+  framing: ShortenFraming,
 ): boolean {
   const session = week.sessions[index]!;
   const minutes = shortenedMinutes(session);
@@ -226,10 +305,8 @@ function shortenForSharpness(
     index,
     { durationMinutes: minutes },
     change(
-      `${opener} This is race week, so the ${TITLE_OF[session.kind].toLowerCase()} keeps its kind and its pace and ` +
-        `just gets shorter: ${session.durationMinutes} minutes down to ${minutes}. Fewer reps, same speed — sharpness ` +
-        `is the one thing you cannot get back before the start line, and feeling flat in a taper is normal rather than ` +
-        `a reason to train easy.`,
+      `${opener} ${framing.because} the ${TITLE_OF[session.kind].toLowerCase()} keeps its kind and its pace and ` +
+        `just gets shorter: ${session.durationMinutes} minutes down to ${minutes}. ${framing.close}`,
     ),
     state,
   );
@@ -260,8 +337,8 @@ function downgradeToday(week: WorkingWeek, index: number, state: AthleteState, o
   // lands on `run_easy` rather than on the `run_threshold` a single step
   // would give — a hard session prescribed to an athlete who just said they
   // are under par (DECISIONS B1).
-  if (kind === session.kind) return shortenForSharpness(week, index, state, opener);
-  if (kindTakenOn(week, session.date, kind, index)) return shortenForSharpness(week, index, state, opener);
+  if (kind === session.kind) return shortenForSharpness(week, index, state, opener, NO_EASIER_VERSION_FRAMING);
+  if (kindTakenOn(week, session.date, kind, index, state)) return shortenForSharpness(week, index, state, opener, NO_EASIER_VERSION_FRAMING);
   const minutes = Math.min(session.durationMinutes, clampKind(kind, session.durationMinutes));
   return adjustSessionAt(
     week,
@@ -292,11 +369,11 @@ function applyLowBand(week: WorkingWeek, state: AthleteState, today: string, ope
     if (!isHard(session)) continue;
 
     if (sharpness) {
-      shortenForSharpness(week, index, state, opener);
+      shortenForSharpness(week, index, state, opener, RACE_WEEK_FRAMING);
       continue;
     }
 
-    if (canMoveToTomorrow(week, index, today)) {
+    if (canMoveToTomorrow(week, index, today, state)) {
       moveToTomorrow(week, index, today, state, opener);
       continue;
     }

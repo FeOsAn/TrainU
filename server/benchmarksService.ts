@@ -107,10 +107,53 @@ function saveAthleteRow(row: AthleteRow): void {
   }
 }
 
-function viewOf(id: BenchmarkId, stored: Measured<number> | undefined): BenchmarkView {
+/**
+ * The stored effort, aged against TODAY rather than against the day it was
+ * typed in.
+ *
+ * `patchBenchmarks` calls `calibrateBenchmark` with `today` = the day of
+ * entry, so the effort is always inside the 84-day window at that moment and
+ * the provenance string it freezes into the athlete row is always "measured,
+ * 14 Jan". Reading it back verbatim meant the retest branch could only ever
+ * fire for someone who back-dated an entry by twelve weeks AS THEY TYPED IT:
+ * time could not reach it. A HYROX athlete who timed their stations in
+ * January still read "measured, 14 Jan" in September, with no prompt to
+ * retest, after a whole training block. `BENCHMARK_WINDOW_DAYS`' own doc
+ * comment states the intent — "a number that old should say so" — and the
+ * machinery to do it was present and never asked to run. The running
+ * calibration one file over re-derives from session history on every read and
+ * gets this right; this is the same rule, in the one place a station time is
+ * read.
+ *
+ * What this deliberately does NOT do is change the prediction. A stale
+ * measurement is still `verified: true` — an old measurement still beats a
+ * guess, which is the policy `calibrateBenchmark` itself encodes — so
+ * `assessConfidence` sees exactly what it saw before and no band moves. This
+ * is about what the athlete is told, not about the numbers.
+ */
+function agedValue(id: BenchmarkId, stored: Measured<number>, today: string): Measured<number> {
+  // A `Measured` with no date cannot be aged, and one that isn't a measurement
+  // has nothing to age. Either way: exactly what is stored, untouched.
+  if (!stored.asOf || !stored.verified) return stored;
+  const evidence = [{ testId: id, date: stored.asOf, value: stored.value }];
+  const asEntered = calibrateBenchmark(id, BENCHMARK_SEEDS[id], evidence, stored.asOf, BENCHMARK_WINDOW_DAYS);
+  const asOfToday = calibrateBenchmark(id, BENCHMARK_SEEDS[id], evidence, today, BENCHMARK_WINDOW_DAYS);
+  if (asOfToday.source === asEntered.source) return stored;
+  // The athlete's own note leads the stored string ("race sled, 3 Oct gym
+  // session — measured, 3 Oct"); re-deriving without putting it back would
+  // silently delete what they wrote about their own effort.
+  const note = stored.source.endsWith(asEntered.source)
+    ? stored.source.slice(0, stored.source.length - asEntered.source.length)
+    : "";
+  return { ...stored, source: `${note}${asOfToday.source}` };
+}
+
+function viewOf(id: BenchmarkId, stored: Measured<number> | undefined, today: string = todayISO()): BenchmarkView {
   // No stored value means the seed, produced by the same `calibrateBenchmark`
   // call with no evidence — so "not yet measured" is phrased once, not twice.
-  const value = stored ?? calibrateBenchmark(id, BENCHMARK_SEEDS[id], [], todayISO(), BENCHMARK_WINDOW_DAYS);
+  const value = stored
+    ? agedValue(id, stored, today)
+    : calibrateBenchmark(id, BENCHMARK_SEEDS[id], [], today, BENCHMARK_WINDOW_DAYS);
   return {
     id,
     label: BENCHMARK_LABELS[id],
@@ -124,10 +167,14 @@ function viewOf(id: BenchmarkId, stored: Measured<number> | undefined): Benchmar
   };
 }
 
-/** Every HYROX benchmark in race order, roxzone last — measured ones as stored, the rest as honest seeds. */
-export function getBenchmarks(): BenchmarkView[] {
+/**
+ * Every HYROX benchmark in race order, roxzone last — measured ones as
+ * stored, aged against `today`, the rest as honest seeds.
+ */
+export function getBenchmarks(opts: { today?: string } = {}): BenchmarkView[] {
+  const today = opts.today ?? todayISO();
   const stored = athleteParamsFromRow(getAthleteRow()).benchmarks;
-  return HYROX_BENCHMARK_IDS.map((id) => viewOf(id, stored[id]));
+  return HYROX_BENCHMARK_IDS.map((id) => viewOf(id, stored[id], today));
 }
 
 interface ValidEntry {
@@ -200,5 +247,5 @@ export function patchBenchmarks(patch: BenchmarkPatch, opts: { today?: string } 
   row.benchmarks = benchmarks;
   saveAthleteRow(row);
 
-  return getBenchmarks();
+  return getBenchmarks({ today });
 }

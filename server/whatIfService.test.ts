@@ -14,6 +14,7 @@ import { db } from "./db";
 import { conditions, goals, outcomeLog } from "@shared/schema";
 import { addDays, startOfWeek, todayISO } from "@shared/dates";
 import { createGoal, listGoals } from "./goalsService";
+import { updateBlockPreferences } from "./preferencesService";
 import { runWhatIf, WhatIfPatchError } from "./whatIfService";
 
 for (const table of [goals, conditions, outcomeLog]) db.delete(table).run();
@@ -83,4 +84,47 @@ test("a patch that would produce a goal the app would refuse to create is refuse
   const result = runWhatIf({ patch: { op: "shift", goalId: race.id, byWeeks: -52 } }, { today: TODAY });
   assert.ok(result.caveats.length >= 0);
   assert.ok(result.diff.goals.some((g) => g.goalId === race.id));
+});
+
+test("switching \"Something hurts?\" off stops what-if listening to conditions too", () => {
+  /*
+   * Phase 9's promise is ONE matching rule for what a block renders and what
+   * it does. What-if read the conditions table directly, so a block the
+   * athlete had switched off still shaped every hypothetical — the week
+   * ignored their injury and "what if I moved my race?" did not.
+   *
+   * (The staleness rule is enforced downstream in `arbitrateWeek`, which is
+   * why routing through `plannableConditions` is also the one definition of
+   * "open and still trusted" rather than a second copy of it.)
+   *
+   * Pinned on both sides: with the block ON the condition must change the
+   * answer, or this test would pass even if conditions never mattered.
+   */
+  for (const table of [goals, conditions, outcomeLog]) db.delete(table).run();
+  const today = todayISO();
+  const race = createGoal({
+    type: "endurance_race", discipline: "run", label: "Berlin Marathon",
+    targetDate: addDays(today, 180), priority: 1, successCriteria: "sub 3:30",
+    targetMetrics: { targetTimeSeconds: 12600, targetDistanceKm: 42.195 },
+  });
+  createGoal({
+    type: "body_composition", label: "Wedding", targetDate: addDays(today, 60),
+    priority: 2, successCriteria: "lean", targetMetrics: { targetBodyFatPercent: 12 },
+  });
+  db.insert(conditions).values({
+    id: "strain", kind: "injury", label: "Calf strain", bodyPart: "calf",
+    severity: 2, restrictionsJson: JSON.stringify(["no_running"]),
+    openedAt: addDays(today, -3), closedAt: null, note: null,
+    createdAt: addDays(today, -3), updatedAt: `${addDays(today, -1)}T00:00:00.000Z`,
+  }).run();
+
+  const answer = () => JSON.stringify(runWhatIf({ patch: { op: "shift", goalId: race.id, byWeeks: 2 } }, { today }));
+  const withBlockOn = answer();
+  updateBlockPreferences({ "plan.conditions": "off" });
+  const withBlockOff = answer();
+  updateBlockPreferences({ "plan.conditions": null });
+  const restored = answer();
+
+  assert.notEqual(withBlockOff, withBlockOn, "a switched-off block must not keep steering the hypothetical");
+  assert.equal(restored, withBlockOn, "and switching it back on must bring it back");
 });

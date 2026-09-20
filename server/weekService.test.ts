@@ -19,6 +19,7 @@ import { MODULATOR_STAGES, modulatorFor } from "@shared/prescription/adjust";
 import { createGoal } from "./goalsService";
 import { openCondition } from "./conditionsService";
 import { recordCompletion } from "./completionsService";
+import { upsertCheckIn } from "./checkInsService";
 import { updateBlockPreferences } from "./preferencesService";
 import { buildWeek } from "./weekService";
 
@@ -154,4 +155,106 @@ test("browsing next week does not apply this morning's state to it", () => {
   const next = buildWeek({ date: addDays(WEEK_END, 1), today: TODAY });
   assert.equal(next.weekStart, addDays(TODAY, 7));
   assert.equal(next.readiness, null);
+});
+
+/*
+ * ─── Regressions ──────────────────────────────────────────────────────────
+ */
+
+test("DEFECT: adherence never counts the app's OWN rest days as sessions the athlete failed to do", () => {
+  // A fever on the week's first day turns every day into a rest card. The
+  // denominator used to be `adjusted.sessions.length`, which counts those
+  // synthetic rest sessions — so an athlete resting exactly as instructed
+  // read "Adherence 0% — 0 done, 0 skipped of 5 prescribed". A rest card
+  // cannot be ticked; nothing was asked of them, and the honest answer is
+  // "no rate yet", not zero. This is the number the deferred learners are
+  // meant to be built on.
+  openCondition({ kind: "illness", label: "Flu", severity: 3, openedAt: TODAY }, { today: TODAY });
+
+  const ill = buildWeek({ date: TODAY, today: TODAY });
+  assert.ok(
+    ill.days.flatMap((d) => d.sessions).every((s) => s.kind === "rest"),
+    "a severity-3 illness rests the whole week",
+  );
+  assert.equal(ill.adherence.prescribed, 0, "a rest day is not something asked of the athlete");
+  assert.equal(ill.adherence.adherenceRate, null, "nothing asked is not the same as nothing done");
+
+  // DECISIONS B7: a dropped session the athlete did anyway counts on BOTH
+  // sides. It is not in `adjusted.sessions` at all, so a denominator built
+  // from that alone with a numerator built from completions gives 1/0.
+  const dropped = ill.dropped[0]!;
+  recordCompletion({ date: dropped.date, kind: dropped.kind, status: "completed" });
+
+  const after = buildWeek({ date: TODAY, today: TODAY });
+  assert.equal(after.adherence.prescribed, 1);
+  assert.equal(after.adherence.completed, 1);
+  assert.equal(after.adherence.adherenceRate, 1, "one session asked of them, one done — never 133%, never a divide by zero");
+
+  db.delete(conditions).run();
+  db.delete(sessionCompletions).run();
+});
+
+test("DEFECT: yesterday's check-in adjustment does not evaporate at midnight", () => {
+  const tuesday = addDays(TODAY, 1);
+  const wednesday = addDays(TODAY, 2);
+
+  // Six ordinary mornings first: below five check-ins readiness reports but
+  // does not act (DECISIONS C2), so without these the slice is inert and the
+  // test would pin nothing. The fixtures that missed this defect had exactly
+  // one check-in, dated today.
+  for (let back = 8; back >= 3; back--) {
+    upsertCheckIn({ date: addDays(TODAY, -back), sleepQuality: 3, soreness: 3, energy: 3 });
+  }
+  upsertCheckIn({ date: tuesday, sleepQuality: 1, soreness: 5, energy: 1 });
+
+  const onTuesday = buildWeek({ date: TODAY, today: tuesday });
+  const tuesdayAsLived = onTuesday.days.find((d) => d.date === tuesday)!;
+  assert.ok(
+    tuesdayAsLived.sessions.length > 0 && tuesdayAsLived.sessions.every((s) => s.kind === "rest"),
+    "a very low morning rests the day",
+  );
+  const droppedOnTuesday = onTuesday.dropped.filter((s) => s.date === tuesday).map((s) => s.kind);
+  assert.ok(droppedOnTuesday.length > 0, "what was planned stays recoverable (B7)");
+
+  // Wednesday. The week re-derives from scratch, and Tuesday used to come
+  // back as a full threshold run the athlete never did: no reason text, no
+  // "actually, I did this" control, rest-day macros replaced by training-day
+  // ones, and the adherence line counting the session the app itself removed
+  // as one they failed to do.
+  const onWednesday = buildWeek({ date: TODAY, today: wednesday });
+  const tuesdayLater = onWednesday.days.find((d) => d.date === tuesday)!;
+  assert.ok(tuesdayLater.sessions.every((s) => s.kind === "rest"), "Tuesday's rest day is still Tuesday's rest day");
+  assert.deepEqual(
+    onWednesday.dropped.filter((s) => s.date === tuesday).map((s) => s.kind),
+    droppedOnTuesday,
+    "the session the layer removed stays tickable after midnight",
+  );
+  assert.deepEqual(tuesdayLater.nutrition, tuesdayAsLived.nutrition, "the athlete ate to the number the app gave them");
+  assert.equal(tuesdayLater.dailyTss, tuesdayAsLived.dailyTss);
+  assert.equal(onWednesday.totalMinutes, onTuesday.totalMinutes);
+  assert.equal(onWednesday.adherence.prescribed, onTuesday.adherence.prescribed, "no phantom missed session");
+  assert.ok(
+    onWednesday.adjustments.some((a) => a.date === tuesday && a.source === "checkin"),
+    "and the changes panel can still say why",
+  );
+
+  // A past morning may only take load away where it stood: nothing it does
+  // may put a session on a day the athlete has also already lived through.
+  for (const date of [tuesday, wednesday]) {
+    const then = onTuesday.days.find((d) => d.date === date)!.sessions.length;
+    const now = onWednesday.days.find((d) => d.date === date)!.sessions.length;
+    assert.ok(now <= then, `replaying a past morning invented a session on ${date}`);
+  }
+
+  // The far side of the boundary: a morning that has not happened cannot act
+  // on the week, however bad it says it was.
+  upsertCheckIn({ date: addDays(TODAY, 4), sleepQuality: 1, soreness: 5, energy: 1 });
+  const stillMonday = buildWeek({ date: TODAY, today: TODAY });
+  assert.equal(
+    stillMonday.adjustments.filter((a) => a.source === "checkin").length,
+    0,
+    "Friday's check-in cannot rest Friday while it is still Monday",
+  );
+
+  db.delete(dailyCheckIns).run();
 });

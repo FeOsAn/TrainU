@@ -26,6 +26,13 @@
  * until the requirement finally crosses the safe ceiling. `progressVsGoal`
  * therefore projects the OBSERVED rate forward to the target DATE and
  * compares finishing weights.
+ *
+ * …AND THAT RATE IS WINDOWED. The first version of that projection regressed
+ * the athlete's entire logged history, which let the same failure in through
+ * the back door: a cut that finished in June kept the slope pointing down
+ * through eight weeks of nothing, and the athlete read "On track". The rate
+ * comes out of `trend()` over `PROGRESS_WINDOW_DAYS` — one window, one
+ * mechanism, so the number the verdict asserts is the number the panel plots.
  */
 
 import { ATHLETE_NUMERIC_BOUNDS, type AthleteParams } from "./athlete";
@@ -340,6 +347,25 @@ export const PROGRESS_STATUS_LABELS: Record<ProgressStatus, string> = {
  */
 export const STALE_ENTRY_DAYS = 21;
 
+/**
+ * How far back a RATE may be measured over. `STALE_ENTRY_DAYS` asks whether
+ * the newest weigh-in is current; this asks the other half of the same
+ * question — how old the OLDEST contributing one is. Without it the verdict
+ * was a least-squares fit over the athlete's whole logged history, so a cut
+ * that finished last autumn kept projecting a descent forward and an athlete
+ * who had lost nothing since July still read "On track" — the failure this
+ * file's own header sets out to prevent, reintroduced by a different route.
+ *
+ * 42 days, not 28: a fortnightly weigher still gets 3–4 points, and 28 days
+ * of daily ±1 kg water noise puts roughly ±0.25 kg/wk of error on the slope,
+ * which is the same size as the requirement on a typical cut — the verdict
+ * would then flip week to week on noise. It is 3× `MIN_TREND_SPAN_DAYS` and
+ * 2× `STALE_ENTRY_DAYS`, and it is the ONE window: `progressVsGoal` reads its
+ * rate out of `trend()` over exactly these days rather than computing a
+ * second one of its own.
+ */
+export const PROGRESS_WINDOW_DAYS = 42;
+
 /** Floor on the tolerance band, in kg. A flat band would flip a 12 kg cut's verdict week to week. */
 export const MIN_TOLERANCE_KG = 0.5;
 /** …so the band also scales with the size of the goal: 10% of the total change still to come. */
@@ -394,9 +420,23 @@ export function progressVsGoal(
     today,
   });
 
-  const points = pointsFor(entries, "weightKg").filter((p) => daysBetween(today, p.date) <= 0);
-  const last = points.length ? points[points.length - 1] : null;
-  const observed = weeklyRate(points);
+  /*
+   * `last` is the whole history's newest weigh-in and stays that way: it is
+   * the projection's anchor, it is what `latestWeightKg` reports, and it is
+   * what the staleness sentence below quotes. Windowing IT would make a
+   * 60-day-stale athlete read as one who has never logged anything.
+   *
+   * The RATE is a different question and takes the window — and it takes it
+   * by reading `trend()` rather than regressing a second series of its own,
+   * so the number the verdict asserts and the number the panel plots cannot
+   * drift apart. They already had: the panel showed a flat line while the
+   * verdict projected a descent that finished ten months earlier.
+   */
+  const all = pointsFor(entries, "weightKg").filter((p) => daysBetween(today, p.date) <= 0);
+  const last = all.length ? all[all.length - 1] : null;
+  const recent = trend(entries, { days: PROGRESS_WINDOW_DAYS, today }).weightKg;
+  const points = recent?.series ?? [];
+  const observed = recent?.changePerWeek ?? null;
   const daysSince = last ? daysBetween(last.date, today) : null;
 
   /*
@@ -449,11 +489,19 @@ export function progressVsGoal(
     );
   }
   if (observed == null) {
-    const span = points.length >= 2 ? points[points.length - 1].dayOffset - points[0].dayOffset : 0;
+    if (points.length < 2) {
+      // Two different absences, and the window created the second one: an
+      // athlete with years of history whose previous weigh-in was 100 days
+      // ago has ONE point in the window. Telling them they have one weigh-in
+      // is false and reads as a broken screen.
+      return unknown(
+        all.length >= 2
+          ? `Only one weigh-in in the last ${PROGRESS_WINDOW_DAYS} days — the ones before that are too old to say what is happening now. Log another and this can call it.`
+          : `One weigh-in is a number, not a trend. Log another and this will tell you whether ${goal.label} is on course.`,
+      );
+    }
     return unknown(
-      points.length < 2
-        ? `One weigh-in is a number, not a trend. Log another and this will tell you whether ${goal.label} is on course.`
-        : `${span} days of weigh-ins is still inside the noise — bodyweight swings about a kilo across a day. At ${MIN_TREND_SPAN_DAYS} days this can call it.`,
+      `${recent!.spanDays} days of weigh-ins is still inside the noise — bodyweight swings about a kilo across a day. At ${MIN_TREND_SPAN_DAYS} days this can call it.`,
     );
   }
 
@@ -463,21 +511,54 @@ export function progressVsGoal(
   const weeksFromLast = daysBetween(last.date, goal.targetDate) / 7;
   const projectedWeightKg = round(last.value + observed * weeksFromLast, 2);
   const missBy = projectedWeightKg - targetWeightKg;
-  const direction = Math.sign(prediction.requiredWeeklyChangeKg ?? 0);
+
+  /*
+   * Which way this goal was ever pointing — a cut, a lean gain, or holding.
+   *
+   * NOT `Math.sign(requiredWeeklyChangeKg)`, which is the same hazard this
+   * file's header names one level down: the predictor recomputes that number
+   * from TODAY's weight, so it reads 0 both for "hold this weight" and for
+   * "you already got there", and the fallback called both of them behind. An
+   * athlete who hit their cut target early was told they were behind and —
+   * since the sentence quotes the required rate — that they needed "0 kg a
+   * week", which is not a sentence. It went wrong a half-kilo either side of
+   * the target too: at 74.5 kg against 75 the required rate turns positive
+   * and the goal reads as a lean gain being undershot.
+   *
+   * The intent comes instead from where the athlete stood when the trend now
+   * being projected began. A true hold goal (started on the target) keeps the
+   * old behaviour exactly: drifting either way is off plan.
+   */
+  const startWeightKg = points[0]?.value ?? prediction.currentWeightKg;
+  const intent = Math.sign(round(targetWeightKg - startWeightKg, 1));
 
   let status: ProgressStatus;
   if (Math.abs(missBy) <= toleranceKg) status = "on_track";
-  else if (direction < 0) status = missBy < 0 ? "ahead" : "behind";
-  else if (direction > 0) status = missBy > 0 ? "ahead" : "behind";
+  else if (intent < 0) status = missBy < 0 ? "ahead" : "behind";
+  else if (intent > 0) status = missBy > 0 ? "ahead" : "behind";
   else status = "behind"; // holding a weight: drifting either way is off target
 
   const rateWords = `${observed === 0 ? "holding steady" : `${kg(Math.abs(observed))} a week ${observed < 0 ? "down" : "up"}`}`;
+
+  /*
+   * What "behind" asks for. The required rate can round away to nothing —
+   * the athlete is standing ON the target and drifting off it — and printing
+   * it regardless produced "Needs 0 kg a week from here". When there is no
+   * rate to name, the honest instruction is the weight itself.
+   */
+  const requiredAbs = Math.abs(prediction.requiredWeeklyChangeKg ?? 0);
+  const needs =
+    round(requiredAbs, 1) === 0
+      ? `You are on ${kg(targetWeightKg)} today — holding it is all this asks, and the last ${PROGRESS_WINDOW_DAYS} days say you are moving off it.`
+      : `Needs ${kg(requiredAbs)} a week from here${prediction.achievable ? "" : ", which is above a sustainable rate — moving the date or the target is the honest fix"}.`;
+  const easeOff = intent > 0 ? "You could ease the surplus and still arrive." : "You could ease the deficit and still arrive.";
+
   const summary =
     status === "on_track"
       ? `At ${rateWords} you land on about ${kg(projectedWeightKg)} by ${goal.targetDate} — within ${kg(toleranceKg)} of the ${kg(targetWeightKg)} ${goal.label} asks for.`
       : status === "ahead"
-        ? `At ${rateWords} you land on about ${kg(projectedWeightKg)} by ${goal.targetDate}, past the ${kg(targetWeightKg)} ${goal.label} asks for. You could ease the deficit and still arrive.`
-        : `At ${rateWords} you land on about ${kg(projectedWeightKg)} by ${goal.targetDate}, ${kg(Math.abs(missBy))} off the ${kg(targetWeightKg)} ${goal.label} asks for. Needs ${kg(Math.abs(prediction.requiredWeeklyChangeKg ?? 0))} a week from here${prediction.achievable ? "" : ", which is above a sustainable rate — moving the date or the target is the honest fix"}.`;
+        ? `At ${rateWords} you land on about ${kg(projectedWeightKg)} by ${goal.targetDate}, past the ${kg(targetWeightKg)} ${goal.label} asks for. ${easeOff}`
+        : `At ${rateWords} you land on about ${kg(projectedWeightKg)} by ${goal.targetDate}, ${kg(Math.abs(missBy))} off the ${kg(targetWeightKg)} ${goal.label} asks for. ${needs}`;
 
   return { ...base, status, statusLabel: PROGRESS_STATUS_LABELS[status], projectedWeightKg, summary };
 }

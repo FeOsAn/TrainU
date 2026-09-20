@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "../lib/api";
+import { api, invalidateEngineAnswer } from "../lib/api";
+import { useSurfaceBlocks } from "../lib/appShell";
 
 const TSB_TONE: Record<string, string> = {
   peak: "notice",
@@ -11,6 +12,22 @@ const TSB_TONE: Record<string, string> = {
 
 export default function Data() {
   const queryClient = useQueryClient();
+  /*
+   * Phase 9's promise: switching a block off in "Your app" switches off what
+   * it does, not just where it is listed. This page ignored the assembled
+   * shell entirely — `data.load`, `data.sessions` and `data.calibration` are
+   * all switchable, the Your app page offered on/off/let-my-goals-decide for
+   * each, the assembler honoured the override, and all four panels rendered
+   * anyway. The surface only collapsed when ALL of them were off (which is
+   * what removes the nav tab), so the one case that happened to work was the
+   * one case the tests covered.
+   *
+   * `undefined` means the shell has not loaded yet and everything renders —
+   * same rule as Plan.tsx, because a page that flashes empty on every load is
+   * worse than one that briefly shows a panel the athlete is about to lose.
+   */
+  const dataBlocks = useSurfaceBlocks("data");
+  const has = (id: string) => dataBlocks === undefined || dataBlocks.includes(id);
   const { data: load } = useQuery({ queryKey: ["training-load"], queryFn: api.trainingLoad });
   const { data: sessions } = useQuery({ queryKey: ["sessions"], queryFn: api.sessions });
   const { data: prefs } = useQuery({ queryKey: ["preferences"], queryFn: api.preferences });
@@ -23,10 +40,11 @@ export default function Data() {
 
   const sync = useMutation({
     mutationFn: (provider: "garmin" | "whoop") => (provider === "garmin" ? api.syncGarmin() : api.syncWhoop()),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["sessions"] });
-      queryClient.invalidateQueries({ queryKey: ["training-load"] });
-    },
+    // Newly-synced sessions are the athlete's chronic load, and the ACWR
+    // ceiling in the modulation layer clamps the week against exactly that
+    // (DECISIONS B4) — so a sync can change this week's sessions, not just
+    // this page's tables.
+    onSuccess: () => invalidateEngineAnswer(queryClient, ["sessions"], ["training-load"]),
   });
 
   return (
@@ -36,7 +54,7 @@ export default function Data() {
         <h1>Load, sessions & calibration</h1>
       </div>
 
-      {load && (
+      {has("data.load") && load && (
         <div className="panel">
           <div className="section-label" style={{ marginBottom: 10 }}>
             Training load
@@ -113,7 +131,7 @@ export default function Data() {
         )}
       </div>
 
-      {calibration && (
+      {has("data.calibration") && calibration && (
         <div className="panel">
           <div className="section-label" style={{ marginBottom: 10 }}>
             Calibration
@@ -162,6 +180,11 @@ export default function Data() {
         </div>
       )}
 
+      {/* Connectors, above, is deliberately NOT gated: it is not a block, it
+        * never appears on the Your app page, and it is what keeps /data from
+        * being a blank screen when the tab has collapsed but the route is
+        * still registered. */}
+      {has("data.sessions") && (
       <div className="panel">
         <div className="section-label" style={{ marginBottom: 10 }}>
           Recent sessions
@@ -194,6 +217,7 @@ export default function Data() {
           </table>
         )}
       </div>
+      )}
     </div>
   );
 }

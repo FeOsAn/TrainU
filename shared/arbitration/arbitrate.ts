@@ -14,7 +14,7 @@
 
 import type { Goal, GoalConflict } from "../goal";
 import type { AthleteParams } from "../athlete";
-import { isOpenOn, type Condition } from "../conditions";
+import { conditionsOn, type Condition } from "../conditions";
 import { addDays } from "../dates";
 import { phaseForGoal, type GoalPhase, type NutritionStance } from "./goalPhase";
 
@@ -151,7 +151,22 @@ export function arbitrateWeek(
    */
   const weekEnd = addDays(date, 6);
   const asOf = today < date ? date : today > weekEnd ? weekEnd : today;
-  const healing = conditions.filter((c) => c.severity >= HEALING_SEVERITY && isOpenOn(c, asOf));
+  /*
+   * Read through `conditionsOn`, the one per-date view every other consumer
+   * uses, rather than the raw `isOpenOn` predicate. `isOpenOn` knows nothing
+   * about staleness, so a severity-2 strain opened in June and never closed
+   * kept the cut at maintenance in September — on the very screen that
+   * simultaneously showed the same injury greyed out as suspended and applied
+   * none of its restrictions to any session. Dead state the rest of the app
+   * had explicitly stopped trusting still steered nutrition: the Phase 3
+   * past-goal archetype, one layer over.
+   *
+   * Both dates are passed on purpose. Openness is a fact about the date being
+   * planned (`asOf`); staleness is a fact about NOW (`today`). Letting `today`
+   * default to `asOf` would judge a past week's conditions against that past
+   * date and re-animate every one of them.
+   */
+  const healing = conditionsOn(conditions, asOf, today).open.filter((c) => c.severity >= HEALING_SEVERITY);
   if (healing.length > 0 && nutritionStance !== "maintenance") {
     const pausedStance = nutritionStance;
     const paused = live.find(({ phase }) => phase.nutritionStance === pausedStance);

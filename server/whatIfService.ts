@@ -23,9 +23,7 @@ import { startOfWeek, todayISO } from "@shared/dates";
 import { type GoalPatch, WHAT_IF_OPS, WhatIfPatchError, applyGoalPatch, whatIf, type WhatIfResult } from "@shared/arbitration/whatIf";
 import { validateGoalInput } from "./goalValidation";
 import { listGoals } from "./goalsService";
-import { listConditions } from "./conditionsService";
-import { getAthleteParams, CONDITION_HISTORY_DAYS } from "./athleteStateService";
-import { addDays } from "@shared/dates";
+import { getAthleteParams, plannableConditions } from "./athleteStateService";
 
 export { WhatIfPatchError };
 
@@ -65,7 +63,15 @@ export function runWhatIf(body: unknown, options: RunWhatIfOptions = {}): WhatIf
     validateGoalInput(goal);
   }
 
-  const conditions = listConditions({ closedOnOrAfter: addDays(today, -CONDITION_HISTORY_DAYS) });
+  /*
+   * The same conditions the real plan is built from — including the staleness
+   * rule. Reading the table directly let a suspended condition (28 days
+   * untouched, changing no session, shown greyed out asking "is this still
+   * true?") keep steering every week of a what-if, so the answer to "what if I
+   * moved my race?" disagreed with the plan it was supposed to be predicting.
+   * One definition of "open and still trusted", used everywhere.
+   */
+  const conditions = plannableConditions(today);
 
   return whatIf(
     goals,

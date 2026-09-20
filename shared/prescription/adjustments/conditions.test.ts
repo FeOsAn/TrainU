@@ -7,13 +7,15 @@ import { arbitrateWeek } from "../../arbitration/arbitrate";
 import {
   type Condition,
   RESTRICTIONS,
+  type Restriction,
   SUBSTITUTE_LOAD_FACTOR,
+  type Severity,
   isForbidden,
 } from "../../conditions";
 import { measured } from "../../measured";
 import { buildSession, prescribeWeek } from "../prescribe";
 import { SESSION_KINDS, type PrescribedWeek, type SessionKind, sessionCompletionKey } from "../sessionKinds";
-import { INTENSITY_OF, KIND_MINUTES, clampKind, equivalentMinutes } from "../templates";
+import { INTENSITY_OF, KIND_MINUTES } from "../templates";
 import {
   type AthleteState,
   type ModulatorSlot,
@@ -70,6 +72,13 @@ function prescribe(over: Partial<Goal> = {}, daysPerWeek?: number): PrescribedWe
 const BASE_WEEK = prescribe();
 /** A build week, which is the one that carries two genuinely hard sessions plus a lift. */
 const BUILD_WEEK = prescribe({ targetDate: "2026-12-06" }, 6);
+/**
+ * Race week. The week where every session is already near its kind's healthy
+ * minimum, which is exactly where the substitution floor used to swallow the
+ * severity dose whole and hand an injured athlete a BIGGER week than a
+ * healthy one.
+ */
+const TAPER_WEEK = prescribe({ targetDate: "2026-09-20" });
 
 function condition(over: Partial<Condition> = {}): Condition {
   return {
@@ -193,21 +202,103 @@ test("an illness that closed before the week starts rests nothing", () => {
  * ─── (b) A ruled-out kind ─────────────────────────────────────────────────
  */
 
-test("a forbidden long run becomes a ride of equivalent LOAD, not equivalent minutes", () => {
+/*
+ * ─── What a substitute costs (defects 1 and 2) ────────────────────────────
+ *
+ * The table this slice is pinned to. A substitute carries the session's
+ * VOLUME and then the severity dose. It does NOT carry a cross-sport energy
+ * conversion: nothing the prescriber emits is priced by one, because
+ * `buildSession` prices a planned session through `rpeTss`, which is
+ * sport-blind. Sizing a ride off `SPORT_EQUIVALENCE` multiplied the week's
+ * planned load, and `KIND_MINUTES.bike_endurance.min` (45) then clamped the
+ * severity dose away entirely — so severity 1, 2 and 3 all produced the same
+ * 45-minute ride, and a severity-3 injury in race week came out 40 minutes
+ * LONGER than being healthy did.
+ */
+
+/** 40 minutes of easy running, substituted. Each severity, each kit combination. */
+const SUBSTITUTE_TABLE: Array<{ severity: Severity; minutes: number }> = [
+  { severity: 1, minutes: 40 },
+  { severity: 2, minutes: 34 },
+  { severity: 3, minutes: 28 },
+];
+
+test("a 40-minute easy run substitutes to exactly these lengths (defects 1 and 2)", () => {
+  // 40 minutes sits deliberately UNDER bike_endurance's healthy floor of 45.
+  // That is the boundary the old clamp swallowed the whole dose at, and every
+  // existing fixture used the 93-minute long run, which sits above it — which
+  // is why the suite was green.
+  assert.ok(40 < KIND_MINUTES.bike_endurance.min, "the fixture must sit under the floor or it proves nothing");
+  const week = synthetic([["run_easy", MONDAY, 40]]);
+  const original = week.sessions[0]!;
+
+  for (const { severity, minutes } of SUBSTITUTE_TABLE) {
+    const withBike = adjust(week, state({ conditions: [condition({ severity })], available: { bike: true, swim: true } }));
+    assert.equal(withBike.sessions[0]!.kind, "bike_endurance", `severity ${severity}`);
+    assert.equal(withBike.sessions[0]!.durationMinutes, minutes, `severity ${severity}, with a bike`);
+    assert.ok(withBike.sessions[0]!.tss <= original.tss, `severity ${severity} costs more than the run it replaced`);
+
+    const poolOnly = adjust(week, state({ conditions: [condition({ severity })], available: { bike: false, swim: true } }));
+    assert.equal(poolOnly.sessions[0]!.kind, "swim_technique", `severity ${severity}`);
+    assert.equal(poolOnly.sessions[0]!.durationMinutes, minutes, `severity ${severity}, with only a pool`);
+    assert.ok(poolOnly.sessions[0]!.tss <= original.tss, `severity ${severity} costs more than the run it replaced`);
+
+    const neither = adjust(week, state({ conditions: [condition({ severity })], available: { bike: false, swim: false } }));
+    assert.equal(neither.sessions[0]!.kind, "rest", `severity ${severity}`);
+    assert.equal(neither.totalMinutes, 0, `severity ${severity}`);
+  }
+
+  // The severity dose is the ONLY thing that differentiates them, and it is
+  // monotone. Before the fix these three were byte-identical 45-minute rides.
+  const lengths = SUBSTITUTE_TABLE.map((row) => row.minutes);
+  assert.deepEqual([...lengths].sort((a, b) => b - a), lengths, "a worse injury must ask for less");
+  assert.equal(new Set(lengths).size, lengths.length);
+});
+
+test("a forbidden long run keeps the week's shape, and never outgrows the run it replaced", () => {
   const longRun = BASE_WEEK.sessions.find((s) => s.kind === "run_long")!;
   const out = adjust(BASE_WEEK, state({ conditions: [condition()] }));
   const ride = out.sessions.find((s) => s.date === longRun.date)!;
 
   assert.equal(ride.kind, "bike_endurance");
-  const sameLoad = equivalentMinutes("run_long", "bike_endurance", longRun.durationMinutes);
-  assert.ok(sameLoad > longRun.durationMinutes, "riding costs less per minute, so the same load takes longer");
-  assert.equal(ride.durationMinutes, clampKind("bike_endurance", sameLoad * SUBSTITUTE_LOAD_FACTOR[2]));
-  // The whole point of DECISIONS C1: minute-for-minute would have been a
-  // quietly shorter week dressed up as a substitution.
-  assert.ok(ride.durationMinutes > Math.round(longRun.durationMinutes * SUBSTITUTE_LOAD_FACTOR[2]));
+  assert.ok(
+    ride.durationMinutes <= longRun.durationMinutes,
+    `a substitute is never longer than the session it replaces: ${ride.durationMinutes} against ${longRun.durationMinutes}`,
+  );
+  assert.ok(ride.tss <= longRun.tss, `and never more expensive: ${ride.tss} against ${longRun.tss}`);
+  assert.equal(ride.durationMinutes, substituteMinutes("bike_endurance", longRun.durationMinutes, SUBSTITUTE_LOAD_FACTOR[2]));
+  // It is still the biggest thing in the week: substitution must not flatten
+  // a week into five identical sessions with no shape.
+  assert.ok(out.sessions.every((s) => s === ride || s.durationMinutes <= ride.durationMinutes));
   assert.equal(ride.adjustedFrom!.kind, "run_long");
   assert.equal(ride.adjustedFrom!.durationMinutes, longRun.durationMinutes);
   assert.match(ride.note, /Left calf strain/);
+});
+
+test("the worst injury band produces the smallest race week, not the biggest (defect 1)", () => {
+  assert.equal(TAPER_WEEK.phaseName, "taper", "the fixture has to be race week or this proves nothing");
+  let previousMinutes = Number.POSITIVE_INFINITY;
+  let previousTss = Number.POSITIVE_INFINITY;
+  for (const severity of [1, 2, 3] as const) {
+    const out = adjust(TAPER_WEEK, state({ conditions: [condition({ severity })] }));
+    assert.ok(
+      out.totalMinutes <= TAPER_WEEK.totalMinutes,
+      `severity ${severity}: ${out.totalMinutes} min against a healthy ${TAPER_WEEK.totalMinutes}`,
+    );
+    assert.ok(out.totalTss <= TAPER_WEEK.totalTss, `severity ${severity}: ${out.totalTss} TSS`);
+    assert.ok(out.totalMinutes < previousMinutes, `severity ${severity} is not smaller than severity ${severity - 1}`);
+    assert.ok(out.totalTss < previousTss, `severity ${severity} is not cheaper than severity ${severity - 1}`);
+    previousMinutes = out.totalMinutes;
+    previousTss = out.totalTss;
+
+    // Not five identical sessions: the ride replacing the long run still
+    // dominates, and the recovery run is still the smallest thing in the week.
+    const fromLong = out.sessions.find((s) => s.adjustedFrom?.kind === "run_long")!;
+    assert.ok(
+      out.sessions.every((s) => s === fromLong || s.durationMinutes < fromLong.durationMinutes),
+      `severity ${severity} lost the week's shape`,
+    );
+  }
 });
 
 test("the substitute is scaled by the worst open severity, and a niggle is not scaled at all", () => {
@@ -217,7 +308,7 @@ test("the substitute is scaled by the worst open severity, and a niggle is not s
     const ride = out.sessions.find((s) => s.date === longRun.date)!;
     assert.equal(
       ride.durationMinutes,
-      substituteMinutes("run_long", "bike_endurance", longRun.durationMinutes, SUBSTITUTE_LOAD_FACTOR[severity]),
+      substituteMinutes("bike_endurance", longRun.durationMinutes, SUBSTITUTE_LOAD_FACTOR[severity]),
       `severity ${severity}`,
     );
   }
@@ -481,11 +572,11 @@ test("the guard alone still refuses to prescribe a ruled-out kind", () => {
   assert.ok(out.sessions.every((s) => !isForbidden(s.kind, ["no_running"])));
 });
 
-test("the guard does not dose: it converts the load and stops there", () => {
+test("the guard does not dose: it swaps the kind minute for minute and stops there", () => {
   const longRun = BASE_WEEK.sessions.find((s) => s.kind === "run_long")!;
   const guarded = adjust(BASE_WEEK, state({ conditions: [condition()] }), MONDAY, GUARD_ONLY);
   const ride = guarded.sessions.find((s) => s.date === longRun.date)!;
-  assert.equal(ride.durationMinutes, equivalentMinutes("run_long", "bike_endurance", longRun.durationMinutes));
+  assert.equal(ride.durationMinutes, longRun.durationMinutes);
   const dosed = adjust(BASE_WEEK, state({ conditions: [condition()] }));
   assert.ok(dosed.sessions.find((s) => s.date === longRun.date)!.durationMinutes < ride.durationMinutes);
 });
@@ -602,7 +693,7 @@ test("a lower-body injury swaps the lift for one that loads what still works", (
   assert.equal(swapped.date, lift.date);
   assert.equal(
     swapped.durationMinutes,
-    substituteMinutes("strength_lower", "strength_pull", lift.durationMinutes, SUBSTITUTE_LOAD_FACTOR[2]),
+    substituteMinutes("strength_pull", lift.durationMinutes, SUBSTITUTE_LOAD_FACTOR[2]),
   );
 });
 
@@ -636,6 +727,184 @@ test("a substituted session keeps serving every goal the original served", () =>
   const out = adjust(week, state({ conditions: [condition()] }));
   assert.deepEqual(out.sessions[0]!.servesGoalIds, ["race", "wedding"]);
   assert.equal(out.sessions[0]!.kind, "bike_endurance");
+});
+
+/*
+ * ─── Composing conditions (defect 3) ──────────────────────────────────────
+ */
+
+test("adding an illness to an injury makes the week smaller, and the cards say so (defect 3)", () => {
+  const strain = condition({ severity: 2 }); // Can't run
+  const infection = illness({ label: "Chest infection", severity: 2, restrictions: [] });
+
+  const injuryOnly = adjust(BASE_WEEK, state({ conditions: [strain] }));
+  const illnessOnly = adjust(BASE_WEEK, state({ conditions: [infection] }));
+  const both = adjust(BASE_WEEK, state({ conditions: [strain, infection] }));
+
+  // The bug: `continue` after a substitution skipped easeForIllness entirely,
+  // so "both" was byte-identical to the strain alone — more than twice the
+  // training the infection alone prescribed, for the athlete who had both.
+  assert.notDeepEqual(
+    both.sessions.map((x) => x.durationMinutes),
+    injuryOnly.sessions.map((x) => x.durationMinutes),
+    "the infection changed nothing",
+  );
+  assert.ok(
+    both.totalMinutes < Math.min(injuryOnly.totalMinutes, illnessOnly.totalMinutes),
+    `both: ${both.totalMinutes} min, injury alone: ${injuryOnly.totalMinutes}, illness alone: ${illnessOnly.totalMinutes}`,
+  );
+  assert.ok(
+    both.totalTss < Math.min(injuryOnly.totalTss, illnessOnly.totalTss),
+    `both: ${both.totalTss} TSS, injury alone: ${injuryOnly.totalTss}, illness alone: ${illnessOnly.totalTss}`,
+  );
+
+  // And it is visible. `causesFor` only names conditions whose OWN
+  // restrictions rule the kind out, so an illness with nothing ticked was
+  // structurally invisible: five ride cards blaming the calf and not a word
+  // about the infection.
+  for (const session of both.sessions.filter((x) => x.kind !== "rest")) {
+    assert.match(session.note, /Chest infection/, session.date);
+    assert.match(session.note, /below the neck/, session.date);
+    assert.match(session.note, /Left calf strain/, session.date);
+  }
+});
+
+test("a return ramp also survives a substitution — the same skipped step (defect 3)", () => {
+  // Open injury forbids running at severity 1 (so the swap itself is
+  // minute-for-minute and changes nothing but the kind), while a separate,
+  // healed injury has the athlete on day 1 of its return ramp. The ride must
+  // still be cut to the ramp stage's load factor.
+  const open = condition({ id: "achilles", label: "Achilles niggle", severity: 1, restrictions: ["no_running"] });
+  const healed = condition({ id: "old", label: "Hamstring strain", severity: 2, openedAt: "2026-09-07", closedAt: "2026-09-13", updatedAt: "2026-09-13T00:00:00.000Z" });
+
+  const swapOnly = adjust(BASE_WEEK, state({ conditions: [open] }));
+  const both = adjust(BASE_WEEK, state({ conditions: [open, healed] }));
+
+  assert.ok(both.sessions.every((x) => x.kind === "bike_endurance"), "running is still ruled out");
+  assert.ok(
+    both.totalMinutes < swapOnly.totalMinutes,
+    `the ramp took nothing off: ${both.totalMinutes} vs ${swapOnly.totalMinutes}`,
+  );
+  const ride = both.sessions.find((x) => x.adjustedFrom?.kind === "run_easy")!;
+  assert.equal(ride.durationMinutes, reducedMinutes(substituteMinutes("bike_endurance", ride.adjustedFrom!.durationMinutes, 1), 0.6));
+  assert.match(ride.note, /back from Hamstring strain/);
+});
+
+/*
+ * ─── The invariant this whole group is about ──────────────────────────────
+ */
+
+test("no condition ever buys the athlete MORE training, over every week, severity and kit", () => {
+  const weeks: Array<[string, PrescribedWeek]> = [
+    ["base", BASE_WEEK],
+    ["build", BUILD_WEEK],
+    ["taper", TAPER_WEEK],
+    ["short sessions", synthetic([
+      ["run_easy", MONDAY, 30],
+      ["run_threshold", "2026-09-15", 40],
+      ["run_intervals", "2026-09-16", 35],
+      ["strength_lower", "2026-09-17", 35],
+      ["run_long", "2026-09-19", 50],
+    ])],
+  ];
+  const kit = [
+    { bike: true, swim: true },
+    { bike: true, swim: false },
+    { bike: false, swim: true },
+    { bike: false, swim: false },
+  ];
+  const restrictionSets: Restriction[][] = [
+    ["no_running"],
+    ["no_impact"],
+    ["no_lower"],
+    ["no_upper"],
+    ["no_running", "no_lower"],
+    [],
+  ];
+
+  const scenarios: Array<[string, Condition[]]> = [];
+  for (const severity of [1, 2, 3] as const) {
+    for (const restrictions of restrictionSets) {
+      const label = restrictions.length ? restrictions.length.toString() : "nothing";
+      scenarios.push([`injury sev ${severity} ruling out ${label}`, [condition({ severity, restrictions })]]);
+      scenarios.push([
+        `injury sev ${severity} ruling out ${label} + illness`,
+        [condition({ severity, restrictions }), illness({ severity: 2, restrictions: [] })],
+      ]);
+      scenarios.push([
+        `injury sev ${severity} ruling out ${label} + a return ramp`,
+        [condition({ severity, restrictions }), condition({ id: "old", label: "Old strain", closedAt: "2026-09-13" })],
+      ]);
+    }
+    scenarios.push([`illness sev ${severity}`, [illness({ severity, restrictions: [] })]]);
+    scenarios.push([`ramp from sev ${severity}`, [condition({ severity, closedAt: "2026-09-13" })]]);
+  }
+
+  for (const [weekName, week] of weeks) {
+    for (const available of kit) {
+      for (const [name, conditions] of scenarios) {
+        const out = adjust(week, state({ conditions, available }));
+        const where = `${weekName} / ${name} / bike=${available.bike} pool=${available.swim}`;
+        assert.ok(out.totalMinutes <= week.totalMinutes, `${where}: ${out.totalMinutes} min against ${week.totalMinutes}`);
+        assert.ok(out.totalTss <= week.totalTss, `${where}: ${out.totalTss} TSS against ${week.totalTss}`);
+
+        for (const session of out.sessions) {
+          if (session.kind === "rest") continue;
+          const originalKind = session.adjustedFrom?.kind ?? session.kind;
+          const before = week.sessions.find((x) => x.date === session.date && x.kind === originalKind);
+          if (!before) continue;
+          assert.ok(
+            session.durationMinutes <= before.durationMinutes,
+            `${where}: ${before.kind} ${before.durationMinutes} min → ${session.kind} ${session.durationMinutes} min`,
+          );
+          assert.ok(
+            session.tss <= before.tss,
+            `${where}: ${before.kind} ${before.tss} TSS → ${session.kind} ${session.tss} TSS`,
+          );
+        }
+      }
+    }
+  }
+});
+
+/*
+ * ─── The card's arithmetic is the arithmetic that happened (defect 1) ─────
+ */
+
+/** Every "N min" and every "N%" a sentence claims, in the order it claims them. */
+function claimsIn(note: string): { minutes: number[]; percents: number[] } {
+  return {
+    minutes: [...note.matchAll(/(\d+) min/g)].map((m) => Number(m[1])),
+    percents: [...note.matchAll(/(\d+)%/g)].map((m) => Number(m[1])),
+  };
+}
+
+test("a substitution card never states a calculation the app did not do (defect 1)", () => {
+  // The old string read: "30 min becomes 45, then 70% of that while this is
+  // open — 45 min". 70% of 45 is 31.5. The athlete was told a reduction that
+  // never happened, on a session that had in fact got LONGER.
+  for (const week of [BASE_WEEK, BUILD_WEEK, TAPER_WEEK]) {
+    for (const severity of [1, 2, 3] as const) {
+      for (const available of [{ bike: true, swim: true }, { bike: false, swim: true }]) {
+        // Injury only: no illness and no ramp, so the substitution sentence
+        // is the whole note and its numbers stand alone.
+        const out = adjust(week, state({ conditions: [condition({ severity })], available }));
+        for (const session of out.sessions.filter((x) => x.adjustedFrom)) {
+          const { minutes, percents } = claimsIn(session.note);
+          assert.ok(minutes.length > 0, `no numbers at all: ${session.note}`);
+          assert.equal(minutes[0], session.adjustedFrom!.durationMinutes, `wrong starting number: ${session.note}`);
+          assert.equal(minutes.at(-1), session.durationMinutes, `the last number is not what it asks for: ${session.note}`);
+          for (const percent of percents) {
+            assert.equal(
+              Math.round(minutes[0]! * (percent / 100)),
+              session.durationMinutes,
+              `the card claims ${percent}% of ${minutes[0]} but prescribes ${session.durationMinutes}: ${session.note}`,
+            );
+          }
+        }
+      }
+    }
+  }
 });
 
 /*

@@ -37,6 +37,7 @@ import {
   pickSubstitute,
   rampStageOn,
   rampStagesFor,
+  steersTraining,
   validateConditionInput,
   validateConditionPatch,
 } from "./conditions";
@@ -276,6 +277,69 @@ test("a one-day fever does not earn a twelve-day ramp", () => {
 test("a long injury's ramp is capped rather than running for months", () => {
   const stages = rampStagesFor(condition({ severity: 3, openedAt: "2025-09-01", closedAt: "2026-09-01" }));
   assert.ok(stages[0]!.days <= 21);
+});
+
+/*
+ * The ramp is a claim about DETRAINING, so a condition that never took a
+ * session away has nothing to come back from.
+ *
+ * Every ramp fixture in this file carried `restrictions: ["no_running"]`,
+ * which is why 568 green tests agreed with the bug. The form sends "nothing
+ * ticked" whenever the athlete ticks no boxes, so a restriction-free record
+ * is the DEFAULT shape of a logged niggle, not an edge case.
+ */
+
+test("a condition that ruled nothing out earns no return ramp (defect 4)", () => {
+  // Logged 1 Jan, no boxes ticked, trained every session all year, tidied up
+  // on 13 Sep. daysOff is 256, which used to buy two capped 21-day stages:
+  // six weeks of easy-only training as a reward for closing the record.
+  const niggle = condition({
+    severity: 1,
+    restrictions: [],
+    openedAt: "2026-01-01",
+    closedAt: "2026-09-13",
+    updatedAt: "2026-01-01T07:00:00.000Z",
+  });
+  assert.equal(daysOff(niggle), 256, "the calendar span is unchanged — it is what we do with it that was wrong");
+  assert.equal(steersTraining(niggle), false, "it removed nothing while it was open");
+  assert.deepEqual(rampStagesFor(niggle), []);
+  assert.equal(rampStageOn(niggle, "2026-09-14"), null, "day 1 after a condition that removed nothing");
+  assert.equal(rampStageOn(niggle, "2026-10-20"), null, "and 37 days after, where the second stage used to still be running");
+  assert.equal(conditionsOn([niggle], "2026-09-14", "2026-09-14").ramping.length, 0);
+
+  // The other side of the boundary: the SAME record with one box ticked did
+  // take sessions away, so it still ramps exactly as before.
+  const real = condition({ ...niggle, restrictions: ["no_running"] });
+  assert.equal(steersTraining(real), true);
+  assert.equal(rampStagesFor(real).length, 2);
+  assert.ok(rampStageOn(real, "2026-09-14") !== null);
+  assert.equal(conditionsOn([real], "2026-09-14", "2026-09-14").ramping.length, 1);
+});
+
+test("an illness with nothing ticked still ramps — its rules act on severity, not on boxes", () => {
+  const infection = condition({
+    kind: "illness",
+    label: "Chest infection",
+    bodyPart: null,
+    severity: 2,
+    restrictions: [],
+    openedAt: "2026-09-01",
+    closedAt: "2026-09-07",
+  });
+  assert.equal(steersTraining(infection), true, "ILLNESS_RULES shortened and capped every session it was open for");
+  assert.equal(rampStagesFor(infection).length, 2);
+  assert.ok(rampStageOn(infection, "2026-09-08") !== null);
+});
+
+test("a restriction that rules out no session kind earns no ramp either", () => {
+  // Read off `forbiddenKinds`, not off `restrictions.length`: what counts is
+  // whether anything was actually removed, decided by the one table the week
+  // adjuster acts on.
+  const bogus = condition({ restrictions: ["shoulder_hurts" as never], openedAt: "2026-09-01", closedAt: "2026-09-07" });
+  assert.equal(forbiddenKinds(bogus.restrictions).size, 0);
+  assert.equal(steersTraining(bogus), false);
+  assert.deepEqual(rampStagesFor(bogus), []);
+  assert.equal(rampStageOn(bogus, "2026-09-08"), null);
 });
 
 test("rampStageOn walks the stages and reports when steady work and full training come back", () => {

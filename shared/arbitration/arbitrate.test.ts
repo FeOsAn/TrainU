@@ -284,3 +284,48 @@ test("an injury opened mid-week pauses the cut on that same week's screen", () =
     "deficit",
   );
 });
+
+test("a SUSPENDED (stale) condition no longer pauses the cut — dead state must stop steering nutrition", () => {
+  /*
+   * The defect this pins: the healing rule read the raw `isOpenOn` date
+   * predicate, which knows nothing about staleness, instead of `conditionsOn`
+   * — the one per-date view the modulation layer and weekService both use.
+   * So a severity-2 strain opened in June and never closed held the cut at
+   * maintenance indefinitely, on a screen that simultaneously showed that
+   * injury greyed out as suspended and applied none of its restrictions to
+   * any session. The only way out was to close a condition the app had
+   * already decided it could not trust. Archetype 1, same shape as the
+   * Phase 3 past-goal bug.
+   *
+   * Every pre-existing condition fixture in this file has a recently-touched
+   * `updatedAt`, which is exactly why 568 green tests missed it — so this
+   * test pins BOTH sides of the boundary rather than one.
+   */
+  const athlete = cutAthlete();
+  const goals = [goal({ id: "cut", type: "body_composition", label: "Wedding", targetDate: "2026-10-31", priority: 1, targetMetrics: { targetWeightKg: 78 } })];
+  const WEEK = "2026-09-21", TODAY = "2026-09-21";
+  const forgotten = (updatedAt: string): Condition =>
+    condition({ openedAt: "2026-06-01", createdAt: "2026-06-01T08:00:00.000Z", updatedAt: `${updatedAt}T08:00:00.000Z` });
+
+  // 27 days since the last edit — still trusted, so the cut is still paused.
+  const justAlive = arbitrateWeek(goals, WEEK, athlete, [forgotten("2026-08-25")], TODAY);
+  assert.equal(justAlive.nutritionStance, "maintenance", "one day inside CONDITION_SUSPEND_DAYS the condition still steers the plan");
+  assert.ok(justAlive.conflicts.some((c) => c.description.includes("Left calf strain")));
+
+  // 28 days — suspended. It contributes nothing to any session, so it must
+  // contribute nothing to nutrition either.
+  const stale = arbitrateWeek(goals, WEEK, athlete, [forgotten("2026-08-24")], TODAY);
+  assert.equal(stale.nutritionStance, "deficit", "a condition the rest of the app has stopped trusting must not keep the cut at maintenance");
+  assert.equal(stale.conflicts.filter((c) => c.description.includes("paused")).length, 0, "and the athlete is not told their cut is paused by it");
+
+  // Staleness is a fact about NOW, openness a fact about the week being
+  // planned — so both dates have to reach `conditionsOn`. If `today` were
+  // allowed to default to the week's own `asOf` (2026-10-19 here), this
+  // freshly-edited condition would read as 29 days stale and stop pausing.
+  const fresh = condition({ openedAt: "2026-06-01", updatedAt: "2026-09-20T08:00:00.000Z" });
+  assert.equal(
+    arbitrateWeek(goals, "2026-10-19", athlete, [fresh], TODAY).nutritionStance,
+    "maintenance",
+    "a future week must judge staleness against today, not against the week it is planning",
+  );
+});

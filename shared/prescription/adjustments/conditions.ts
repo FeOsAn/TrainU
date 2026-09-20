@@ -65,7 +65,7 @@ import {
   restDay,
 } from "../adjust";
 import type { SessionKind } from "../sessionKinds";
-import { INTENSITY_OF, TITLE_OF, clampKind, equivalentMinutes } from "../templates";
+import { INTENSITY_OF, KIND_MINUTES, TITLE_OF } from "../templates";
 
 /*
  * ─── Sizing ───────────────────────────────────────────────────────────────
@@ -89,26 +89,43 @@ export function reducedMinutes(minutes: number, factor: number): number {
 }
 
 /**
- * How long the substitute is (DECISIONS C1).
+ * How long the substitute is: the VOLUME it replaces, then the dose.
  *
- * LOAD first, then dose. `equivalentMinutes` converts across sports so the
- * ride carries the run's training stress rather than its clock time — 60
- * minutes of running is 73 of riding, and swapping minute-for-minute would
- * be an unannounced 18% rest day. Only then is the severity factor applied,
- * because that is a deliberate decision to ask for LESS than the session it
- * replaces while something hurts.
+ * DECISIONS C1 says a substitution must equate LOAD rather than clock time,
+ * and it named `SPORT_EQUIVALENCE` as the mechanism. That mechanism was
+ * wrong about this app: nothing the prescriber emits is priced by
+ * `SPORT_FALLBACK_PER_MIN`. `buildSession` prices a planned session through
+ * `estimateSessionTss` with only a duration and an RPE, which falls through
+ * to `rpeTss` — and `rpeTss` is sport-blind, so 40 planned minutes cost the
+ * same whether they are run, ridden or swum. Converting the minutes UP by an
+ * energy ratio therefore multiplied the week's planned load instead of
+ * preserving it: a 52-minute easy run became a 63-minute ride carrying 21%
+ * more planned TSS than the session it replaced.
+ *
+ * So the rule is the one the file already states in words further down: a
+ * substitute replaces the session's VOLUME, and its intensity is simply gone
+ * while this is open. Minute for minute, then `factor` — which is the
+ * deliberate decision to ask for LESS than the original while something
+ * hurts. Equating planned TSS instead would do the opposite of what that
+ * sentence promises, turning a 52-minute threshold run into a 171-minute
+ * ride, buying lost intensity back with volume.
+ *
+ * The floor is `MIN_REDUCED_MINUTES`, NOT `KIND_MINUTES[toKind].min`, for
+ * exactly the reason given on that constant: the kind minimum describes a
+ * HEALTHY session of that kind, and clamping back up to it discarded the
+ * severity dose whole. `bike_endurance`'s floor is 45, so every run shorter
+ * than that came out as the same 45-minute ride at severity 1, 2 and 3 alike
+ * — a severity-3 injury handed an athlete a LONGER taper week than being
+ * healthy did. Only the kind's MAXIMUM is applied afterwards, because a
+ * four-hour swim is not a session however the arithmetic came out.
  *
  * `factor` is 1 in the end-of-pipeline guard: that pass exists to turn an
  * impossible session into a possible one, and it must be idempotent, so it
  * does not get to make a dosing decision on top.
  */
-export function substituteMinutes(
-  fromKind: SessionKind,
-  toKind: SessionKind,
-  minutes: number,
-  factor: number,
-): number {
-  return clampKind(toKind, equivalentMinutes(fromKind, toKind, minutes) * factor);
+export function substituteMinutes(toKind: SessionKind, minutes: number, factor: number): number {
+  const dosed = Math.round(minutes * factor);
+  return Math.min(KIND_MINUTES[toKind].max, Math.max(MIN_REDUCED_MINUTES, dosed));
 }
 
 /*
@@ -240,9 +257,9 @@ function substituteForbidden(
   restrictions: Restriction[],
   factor: number,
   state: AthleteState,
-): void {
+): AdjustedSession | null {
   const index = week.sessions.indexOf(session);
-  if (index < 0) return;
+  if (index < 0) return null;
 
   const causes = causesFor(session.kind, open);
   const conditionId = causes[0]?.id;
@@ -267,19 +284,28 @@ function substituteForbidden(
       },
       state,
     );
-    return;
+    return null;
   }
 
-  // Stated in the order it is computed, because the two steps mean
-  // different things: the first is an exchange rate between sports, the
-  // second is a decision to ask for LESS than the session it replaces while
-  // something hurts.
-  const equivalent = equivalentMinutes(session.kind, substitute, session.durationMinutes);
-  const minutes = substituteMinutes(session.kind, substitute, session.durationMinutes, factor);
-  const length =
-    factor < 1
-      ? `Length is set by what the session costs you, not by the clock: ${session.durationMinutes} min becomes ${equivalent}, then ${Math.round(factor * 100)}% of that while this is open — ${minutes} min.`
-      : `Length is set by what the session costs you, not by the clock: ${session.durationMinutes} min becomes ${minutes}.`;
+  // Every number in this sentence is read off the value actually used. The
+  // string it replaces narrated an exchange rate and a percentage that the
+  // final minute count contradicted — "30 min becomes 45, then 70% of that
+  // while this is open — 45 min", where 70% of 45 is 31.5. A card that
+  // states arithmetic the app did not do is worse than a card that states
+  // nothing.
+  const minutes = substituteMinutes(substitute, session.durationMinutes, factor);
+  const dosed = Math.round(session.durationMinutes * factor);
+  const bound =
+    minutes < dosed
+      ? "which is as long as this kind of session usefully runs."
+      : minutes > dosed
+        ? "which is as short as a session is worth changing out of for."
+        : null;
+  const length = bound
+    ? `${session.durationMinutes} min becomes ${minutes} min, ${bound}`
+    : factor < 1
+      ? `A swap carries the volume across, at ${Math.round(factor * 100)}% of it while this is open: ${session.durationMinutes} min becomes ${minutes} min.`
+      : `A swap carries the volume across minute for minute: ${minutes} min.`;
   // Said plainly rather than left for the athlete to notice: a substitute
   // replaces a session's VOLUME. When the session it replaces was a hard
   // one, its intensity is simply gone, and claiming otherwise would be a
@@ -306,6 +332,7 @@ function substituteForbidden(
     },
     state,
   );
+  return week.sessions[index] ?? null;
 }
 
 /**
@@ -500,28 +527,59 @@ function walk(week: WorkingWeek, state: AthleteState, today: string, full: boole
     for (const session of targets) {
       if (week.sessions.indexOf(session) < 0) continue; // already removed by an earlier rule on this day
 
+      // The session the illness rule and the ramp get to speak about: the
+      // one that is actually on the day after the swap, not the run that
+      // was there before it.
+      let current: AdjustedSession = session;
+
       if (isForbidden(session.kind, restrictions)) {
         // The dose comes from the WORST thing open on the day, not from
         // whichever condition happened to rule this kind out: an athlete
         // with a niggle and a chest infection is not a niggle.
-        substituteForbidden(week, session, on.open, restrictions, full ? SUBSTITUTE_LOAD_FACTOR[severity ?? 1] : 1, state);
-        continue;
+        const swapped = substituteForbidden(
+          week,
+          session,
+          on.open,
+          restrictions,
+          full ? SUBSTITUTE_LOAD_FACTOR[severity ?? 1] : 1,
+          state,
+        );
+        // The swap has had its say about WHICH session. It has said nothing
+        // about how much training the body can take today, which is what the
+        // illness rule and the return ramp are for — so they compose onto it
+        // rather than being skipped.
+        //
+        // `continue`ing here meant a second condition REMOVED the first
+        // one's dosing: an athlete with a calf strain and a chest infection
+        // got the strain's substitution factor and none of the infection's
+        // "very easy and short", so the week came out more than twice the
+        // size the infection alone produced, and no card mentioned the
+        // infection at all. Adding a second, worse problem must never buy
+        // more training.
+        if (swapped === null) continue; // rested, or already gone
+        if (!full) continue; // the guard pass does not dose — DECISIONS B2
+        current = swapped;
+      } else {
+        if (!full) continue;
+        // Already dosed by this slice, on an earlier pass over the same week.
+        //
+        // The ceiling below is a decision about the session as PRESCRIBED, and
+        // the factor that comes with it is multiplicative — 0.85 twice is 0.72,
+        // a week nobody chose. The pipeline schedules this pass once
+        // (DECISIONS B2), and this is the belt to that braces: re-running the
+        // whole layer over its own output changes nothing, which is what makes
+        // an adjusted week safe to feed back in. A session swapped on THIS
+        // pass is exempt because it is composing, not repeating: on any later
+        // pass its kind is no longer forbidden, so it arrives here and is
+        // skipped like everything else.
+        if (dosedByConditions(session)) continue;
       }
-      if (!full) continue;
-      // Already dosed by this slice, on an earlier pass over the same week.
-      //
-      // The ceiling below is a decision about the session as PRESCRIBED, and
-      // the factor that comes with it is multiplicative — 0.85 twice is 0.72,
-      // a week nobody chose. The pipeline schedules this pass once
-      // (DECISIONS B2), and this is the belt to that braces: re-running the
-      // whole layer over its own output changes nothing, which is what makes
-      // an adjusted week safe to feed back in.
-      if (dosedByConditions(session)) continue;
+
       if (illness) {
-        easeForIllness(week, session, illness, state);
+        easeForIllness(week, current, illness, state);
         continue;
       }
-      if (ramping) applyRamp(week, session, ramping, state);
+      if (ramping) applyRamp(week, current, ramping, state);
     }
   }
   return week;

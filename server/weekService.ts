@@ -34,8 +34,14 @@ import {
   type AdjustedSession,
   type AdjustedWeek,
   type Adjustment,
+  type AthleteState,
+  type Modulator,
+  type ModulatorSlot,
+  type WorkingWeek,
   ADJUSTMENT_ACTION_LABELS,
+  MODULATORS,
   adjustWeek,
+  modulatorFor,
 } from "@shared/prescription/adjust";
 import { sessionCompletionKey } from "@shared/prescription/sessionKinds";
 import { dailyTargets, type MacroTarget } from "@shared/nutrition";
@@ -53,11 +59,10 @@ import type { CheckIn, Readiness } from "@shared/readiness";
 import "@shared/prescription/adjustments/conditions";
 import "@shared/prescription/adjustments/readiness";
 
-import { buildAthleteState, getAthleteParams } from "./athleteStateService";
+import { buildAthleteState, getAthleteParams, weekReadiness, type DailyReadiness } from "./athleteStateService";
 import { listGoals } from "./goalsService";
 import { listCompletions, loggedSessionsFor, summariseAdherence, type AdherenceSummary, type CompletionRecord } from "./completionsService";
 import { getCheckIn, recordCheckInAdjustments, type CheckInAdjustmentSummary } from "./checkInsService";
-import { getAppShell } from "./appShellService";
 
 /** A session as the client sees it: the adjusted card plus whether it has been answered. */
 export type WeekSession = AdjustedSession & { completion: CompletionRecord | null };
@@ -160,11 +165,65 @@ function withGoalRisk(arbitrated: ArbitratedWeek, goals: Goal[], conditions: Con
   };
 }
 
-/** The layer's changes, in the words the athlete was shown — never an action id. */
-export function checkInSummaries(adjustments: readonly Adjustment[]): CheckInAdjustmentSummary[] {
+/**
+ * The layer's changes, in the words the athlete was shown — never an action id.
+ *
+ * `from` scopes it to the morning being answered. The week now replays every
+ * check-in it contains (see `replayReadiness`), so without a bound this would
+ * file Tuesday's rest day under Wednesday's check-in and tell the athlete
+ * their check-in had changed a day that was already behind them. `from` is
+ * inclusive and a moved session lands on tomorrow, so both of today's own
+ * outcomes survive it.
+ */
+export function checkInSummaries(adjustments: readonly Adjustment[], from?: string): CheckInAdjustmentSummary[] {
   return adjustments
-    .filter((a) => a.source === "checkin")
+    .filter((a) => a.source === "checkin" && (from == null || a.date >= from))
     .map((a) => ({ date: a.date, kind: a.kind, action: ADJUSTMENT_ACTION_LABELS[a.action], reason: a.reason }));
+}
+
+/** Sessions dated after `date`, counted — what a relocation adds and a removal never does. */
+function sessionsAfter(week: WorkingWeek, date: string): number {
+  return week.sessions.filter((s) => s.date > date).length;
+}
+
+/**
+ * The readiness stage, run once per morning of the week that has already
+ * happened rather than only for today.
+ *
+ * The slice itself is untouched and still answers "what does THIS morning do
+ * to THIS day" — it is handed each day's own check-in with that day as its
+ * `today`, so all four of its gates keep the meaning they were written with.
+ * Replaying it is what stops a past day's adjustment evaporating at midnight
+ * and coming back as a phantom missed session: a week re-derives from
+ * scratch on every request, so the only way Tuesday still reads "rest" on
+ * Wednesday is for Tuesday's morning to be applied again.
+ *
+ * One rule a past day does NOT get: relocation. Moving a hard session onto
+ * an empty tomorrow is a real coaching answer on the morning it is offered,
+ * and nonsense when both days are behind the athlete — it would invent a
+ * session on a day they have already lived through, which is the exact
+ * failure being fixed. A past morning may only take load away where it
+ * stood, so a step that puts a session on a later date is rolled back.
+ */
+function replayReadiness(mornings: readonly DailyReadiness[], today: string): Modulator {
+  return (week, state, _today) => {
+    const run = modulatorFor("readiness");
+    if (!run) return week;
+
+    let current = week;
+    for (const morning of mornings) {
+      if (!morning.readiness) continue;
+      const asThatMorning: AthleteState = { ...state, checkIn: morning.checkIn, readiness: morning.readiness };
+      if (morning.date === today) {
+        current = run(current, asThatMorning, morning.date);
+        continue;
+      }
+      const before = structuredClone(current);
+      const next = run(current, asThatMorning, morning.date);
+      current = sessionsAfter(next, morning.date) > sessionsAfter(before, morning.date) ? before : next;
+    }
+    return current;
+  };
 }
 
 /**
@@ -187,19 +246,15 @@ export function buildWeek(options: BuildWeekOptions = {}): WeekView {
   const activeGoals = listGoals().filter((g) => g.active);
 
   /*
-   * Block off = engine off.
+   * Block off = engine off — decided in `buildAthleteState`, not here.
    *
-   * The two health blocks carry their own capabilities rather than having a
-   * separate engine twin, so switching "Morning check-in" or "Something
-   * hurts?" off in Your app switches the behaviour off through the ONE
-   * matching rule that already decides what renders — not a second flag that
-   * would eventually disagree with the first. One variable each, applied to
-   * both the modulation layer and the arbitration input, so a condition
-   * cannot steer nutrition while being invisible everywhere else.
+   * It used to be two lines in this function, which meant the week obeyed
+   * the athlete's switch and the arbitration, prediction and what-if
+   * endpoints did not: a "Something hurts?" block switched off still paused
+   * their cut and still widened their race prediction. The gate now lives
+   * with the loader (`plannableConditions`), so every consumer reads one
+   * answer.
    */
-  const capabilities = getAppShell(today).capabilities;
-  if (!capabilities.includes("readiness_modulation")) state.readiness = null;
-  if (!capabilities.includes("condition_adjustment")) state.conditions = [];
   const conditions = state.conditions;
 
   const arbitrated = withGoalRisk(
@@ -211,7 +266,16 @@ export function buildWeek(options: BuildWeekOptions = {}): WeekView {
   );
 
   const prescribed = prescribeWeek(arbitrated, activeGoals, athlete, { daysPerWeek: options.daysPerWeek });
-  const adjusted: AdjustedWeek = adjustWeek(prescribed, state, today);
+  /*
+   * The registered pipeline, with the readiness stage replayed across every
+   * morning this week already holds. Same slice, same order, same stage —
+   * the only thing that changes is how many days it is asked about.
+   */
+  const mornings = weekReadiness(weekStart, weekEnd, today);
+  const pipeline: ModulatorSlot[] = MODULATORS.map((slot) =>
+    slot.stage === "readiness" ? { stage: slot.stage, run: replayReadiness(mornings, today) } : slot,
+  );
+  const adjusted: AdjustedWeek = adjustWeek(prescribed, state, today, { modulators: pipeline });
 
   const completions = listCompletions(weekStart, weekEnd);
   const completionByKey = new Map(completions.map((c) => [c.key, c]));
@@ -219,6 +283,35 @@ export function buildWeek(options: BuildWeekOptions = {}): WeekView {
     ...s,
     completion: completionByKey.get(sessionCompletionKey(s.date, s.kind)) ?? null,
   });
+
+  /*
+   * ── Adherence counts what was ASKED of the athlete ───────────────────────
+   *
+   * Not `adjusted.sessions.length`, which is what it used to be. Phase 10's
+   * modulation layer pushes a synthetic `rest` session into the week for
+   * every day it clears, and a rest card can never be ticked — so an athlete
+   * with a fever, doing exactly as instructed, read "Adherence 0% — 0 done,
+   * 0 skipped of 5 prescribed" for a week in which the app asked them for
+   * nothing. That number is the dataset the deferred learners are meant to be
+   * built on, so it being wrong is not cosmetic. It is archetype 1 again: the
+   * removed sessions stopped being prescribed and did not stop counting.
+   *
+   * A key SET rather than a count, because the denominator has two sources
+   * and they overlap. Every real session in the adjusted week is one thing
+   * asked; a session the layer DROPPED that the athlete went and did anyway
+   * (DECISIONS B7) is another, and it is not in `adjusted.sessions` at all —
+   * counting only the first while the numerator counts every completion is
+   * how 3 sessions and 4 completions become 133% adherence.
+   *
+   * Rest is excluded from both sides: the card cannot be ticked, and if a
+   * client renders its buttons anyway a "Done" on it must not push the
+   * numerator past a denominator it was never part of.
+   */
+  const answerableKeys = new Set(
+    adjusted.sessions.filter((s) => s.kind !== "rest").map((s) => sessionCompletionKey(s.date, s.kind)),
+  );
+  const answerable = completions.filter((c) => c.kind !== "rest");
+  for (const c of answerable) answerableKeys.add(c.key);
 
   // The deficit is sized off the rate the body-composition goal's deadline
   // actually demands — carried through on its phase rather than recomputed.
@@ -267,7 +360,7 @@ export function buildWeek(options: BuildWeekOptions = {}): WeekView {
    * record: "you told us, and nothing needed to change".
    */
   if (weekStart === startOfWeek(today) && getCheckIn(today)) {
-    recordCheckInAdjustments(today, checkInSummaries(adjusted.adjustments));
+    recordCheckInAdjustments(today, checkInSummaries(adjusted.adjustments, today));
   }
 
   return {
@@ -278,7 +371,7 @@ export function buildWeek(options: BuildWeekOptions = {}): WeekView {
     totalTss: adjusted.totalTss,
     note: adjusted.note,
     phaseName: adjusted.phaseName,
-    adherence: summariseAdherence(completions, adjusted.sessions.length, athlete, loggedSessionsFor(completions)),
+    adherence: summariseAdherence(answerable, answerableKeys.size, athlete, loggedSessionsFor(answerable)),
     adjustments: adjusted.adjustments,
     original: adjusted.original,
     dropped: adjusted.dropped.map(answer),

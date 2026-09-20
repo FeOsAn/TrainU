@@ -30,6 +30,46 @@ type Field = (typeof FIELDS)[number];
 
 const SCALE = Array.from({ length: CHECK_IN_MAX - CHECK_IN_MIN + 1 }, (_, i) => CHECK_IN_MIN + i);
 
+/** The three answers, and nothing else — what the chips show and what the POST carries. */
+export type Scores = Record<Field, number>;
+
+/**
+ * What a morning nobody has answered is worth.
+ *
+ * It is a PLACEHOLDER for the chips, never a value to send on behalf of a
+ * question the athlete did not answer — see `submittedScores`.
+ */
+export const NEUTRAL_SCORES: Scores = { sleepQuality: 3, soreness: 3, energy: 3 };
+
+function scoresOf(checkIn: { sleepQuality: number; soreness: number; energy: number } | null): Scores | null {
+  if (!checkIn) return null;
+  return { sleepQuality: checkIn.sleepQuality, soreness: checkIn.soreness, energy: checkIn.energy };
+}
+
+/**
+ * What the chips highlight: this session's own tap if there has been one,
+ * otherwise THE STORED MORNING, read fresh from the prop on every render.
+ *
+ * Deriving it rather than seeding it is the whole fix: a value copied into
+ * state at mount cannot know that the week arrived a moment later.
+ */
+export function shownScores(tapped: Scores | null, stored: { sleepQuality: number; soreness: number; energy: number } | null): Scores {
+  return tapped ?? scoresOf(stored) ?? NEUTRAL_SCORES;
+}
+
+/**
+ * The body of the POST. `upsertCheckIn` requires all three scores and
+ * overwrites all three, so the two the athlete did not touch have to be the
+ * two that are STORED — never a neutral placeholder standing in for them.
+ */
+export function submittedScores(
+  tapped: Scores | null,
+  stored: { sleepQuality: number; soreness: number; energy: number } | null,
+  patch: Partial<Scores>,
+): Scores {
+  return { ...shownScores(tapped, stored), ...patch };
+}
+
 /*
  * `GET /api/plan/week` types its check-in as the shared `CheckIn` (that is
  * what `AthleteState` declares), while the row it actually sends is a
@@ -46,11 +86,24 @@ function storedAdjustments(checkIn: CheckIn | null): CheckInRecord["adjustments"
 export function CheckInStrip({ checkIn, readiness }: { checkIn: CheckIn | null; readiness: Readiness | null }) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState<Record<Field, number>>({
-    sleepQuality: checkIn?.sleepQuality ?? 3,
-    soreness: checkIn?.soreness ?? 3,
-    energy: checkIn?.energy ?? 3,
-  });
+  /*
+   * ONLY this session's own taps live here, and it starts EMPTY.
+   *
+   * It used to be seeded from `checkIn` by a `useState` initializer — and
+   * Plan.tsx mounts this strip before the week query resolves (deliberately,
+   * so the line does not shove the session cards down a beat later), so the
+   * initializer always ran against `null` and froze {3,3,3} into state. The
+   * chips then showed 3/3/3 beside a summary reading the athlete's real
+   * score, and because the POST sent the whole triple, re-answering ONE
+   * question rewrote the other two as average: a 5/1/5 morning became
+   * 3/4/3 on a single tap, silently, and "Train as prescribed anyway"
+   * overwrote the very morning it was overriding.
+   *
+   * Everything shown is now DERIVED from the stored check-in (see
+   * `shownScores`) and only replaced while the athlete's own tap is the
+   * newest thing either side knows about.
+   */
+  const [tapped, setTapped] = useState<Scores | null>(null);
   /** Set from the POST's own answer, so the card can never claim a change the plan does not show. */
   const [changed, setChanged] = useState<CheckInRecord["adjustments"] | null>(null);
 
@@ -58,16 +111,23 @@ export function CheckInStrip({ checkIn, readiness }: { checkIn: CheckIn | null; 
     mutationFn: (body: Parameters<typeof api.recordCheckIn>[0]) => api.recordCheckIn(body),
     onSuccess: (result) => {
       setChanged(result.adjustments);
-      setDraft({ sleepQuality: result.checkIn.sleepQuality, soreness: result.checkIn.soreness, energy: result.checkIn.energy });
+      setTapped(scoresOf(result.checkIn));
+      /*
+       * `["week"]` only, and deliberately: readiness is not an input to
+       * `arbitrateWeek`, so no goal conflict can move — unlike a condition,
+       * which is why `invalidateEngineAnswer` exists for that panel.
+       */
       queryClient.invalidateQueries({ queryKey: ["week"] });
     },
   });
 
   const answered = checkIn?.date === todayStr();
+  const scores = shownScores(tapped, checkIn);
   const submit = (patch: Partial<Record<Field, number>> & { trainAnywayOverride?: boolean }) => {
-    const next = { ...draft, ...patch };
-    setDraft(next);
-    save.mutate({ date: todayStr(), ...next, trainAnywayOverride: patch.trainAnywayOverride });
+    const { trainAnywayOverride, ...scores } = patch;
+    const next = submittedScores(tapped, checkIn, scores);
+    setTapped(next);
+    save.mutate({ date: todayStr(), ...next, trainAnywayOverride });
   };
 
   // Collapsed: the whole feature is one line. A band label and a score when
@@ -97,7 +157,7 @@ export function CheckInStrip({ checkIn, readiness }: { checkIn: CheckIn | null; 
                 {SCALE.map((value) => (
                   <button
                     key={value}
-                    className={`chip${draft[field] === value ? " chip-on" : ""}`}
+                    className={`chip${scores[field] === value ? " chip-on" : ""}`}
                     disabled={save.isPending}
                     onClick={() => submit({ [field]: value } as Partial<Record<Field, number>>)}
                   >

@@ -4,6 +4,7 @@ import {
   CONFIRM_WEIGHT_DELTA_KG,
   MIN_TREND_SPAN_DAYS,
   PHYSIQUE_BOUNDS,
+  PROGRESS_WINDOW_DAYS,
   PHYSIQUE_METRICS,
   PHYSIQUE_METRIC_LABELS,
   PROGRESS_STATUS_LABELS,
@@ -19,6 +20,7 @@ import {
 import { ATHLETE_NUMERIC_BOUNDS, DEFAULT_ATHLETE, type AthleteParams } from "./athlete";
 import { measured } from "./measured";
 import type { Goal } from "./goal";
+import { addDays } from "./dates";
 import { predictBodyComposition } from "./predictors/bodyComposition";
 
 const TODAY = "2026-09-18";
@@ -302,4 +304,126 @@ test("no status id and no field name ever reaches the athlete's sentence", () =>
       assert.ok(!p.summary.includes(forbidden), `"${forbidden}" leaked into "${p.summary}"`);
     }
   }
+});
+
+/* ─── the verdict's window ───────────────────────────────────────────────
+ *
+ * Defect: `progressVsGoal` regressed the athlete's ENTIRE logged history, so
+ * weight lost months ago kept driving the projection forward. Every fixture
+ * above spans six weeks or less, where windowed and unwindowed agree — which
+ * is exactly why 568 tests missed it. These pin the boundary on both sides.
+ */
+
+/** Weekly weigh-ins ending on `lastDate`, oldest first. */
+function weekly(lastDate: string, values: number[]): PhysiqueEntry[] {
+  return values.map((weightKg, i) => entry(addDays(lastDate, -7 * (values.length - 1 - i)), { weightKg }));
+}
+
+test("a cut that stalled two months ago stops reading on track — the rate is windowed", () => {
+  // Seven weeks of real loss, then eight weeks of nothing. Least squares over
+  // the lifetime series projects the June loss forward and lands the athlete
+  // on their target; the trailing window says they have not moved since July.
+  const stalled = [...weekly("2026-07-23", [86, 85.3, 84.6, 83.9, 83.2, 82.5, 81.8]), ...weekly("2026-09-17", [81.8, 81.8, 81.8, 81.8, 81.8, 81.8, 81.8, 81.8])];
+  const g = goal({ targetMetrics: { targetWeightKg: 80 }, targetDate: "2026-11-15" });
+  const p = progressVsGoal(stalled, g, DEFAULT_ATHLETE, { today: TODAY });
+
+  assert.equal(p.observedWeeklyChangeKg, 0, "eight weeks at the same weight is a rate of zero, whatever June says");
+  assert.equal(p.status, "behind");
+  assert.ok(p.projectedWeightKg! > 81, `projected ${p.projectedWeightKg} — a stalled athlete lands where they are`);
+  assert.ok(!p.summary.includes("within"), `a stalled cut must not be told it is on course: ${p.summary}`);
+});
+
+test("the verdict reads the same trend the panel plots, over the same window", () => {
+  // Defect: two windows for one set of numbers — `trend()` took one, the
+  // verdict took none. An old completed cut made the verdict assert a descent
+  // the athlete had not been on for ten months while the panel showed flat.
+  const entries = [...weekly("2025-12-20", [85, 84, 83, 82, 81, 80, 79, 78]), ...weekly("2026-09-17", [78, 78.1, 78, 78.1, 78])];
+  const g = goal({ targetMetrics: { targetWeightKg: 72 }, targetDate: "2026-12-20" });
+  const p = progressVsGoal(entries, g, DEFAULT_ATHLETE, { today: TODAY });
+  const shown = trend(entries, { days: PROGRESS_WINDOW_DAYS, today: TODAY }).weightKg!;
+
+  assert.equal(p.observedWeeklyChangeKg, shown.changePerWeek, "one mechanism: the verdict's rate IS the displayed trend's rate");
+  assert.ok(Math.abs(p.observedWeeklyChangeKg!) < 0.05, `got ${p.observedWeeklyChangeKg} — last year's cut is not this month's trend`);
+  assert.equal(p.status, "behind");
+});
+
+test("a weigh-in one day either side of the window boundary is in or out of the rate", () => {
+  // The boundary itself, because "it spans less than six weeks" is what let
+  // the bug through. Same flat recent block, one heavy old reading moved by a
+  // single day across the edge of the window.
+  const flat = weekly("2026-09-17", [80, 80, 80, 80]);
+  const inside = entry(addDays(TODAY, -(PROGRESS_WINDOW_DAYS - 1)), { weightKg: 86 });
+  const outside = entry(addDays(TODAY, -PROGRESS_WINDOW_DAYS), { weightKg: 86 });
+  const g = goal({ targetMetrics: { targetWeightKg: 76 }, targetDate: "2026-12-20" });
+
+  const withInside = progressVsGoal([inside, ...flat], g, DEFAULT_ATHLETE, { today: TODAY });
+  const withOutside = progressVsGoal([outside, ...flat], g, DEFAULT_ATHLETE, { today: TODAY });
+  const withNeither = progressVsGoal(flat, g, DEFAULT_ATHLETE, { today: TODAY });
+
+  assert.ok(withInside.observedWeeklyChangeKg! < -0.5, `the last day of the window still counts, got ${withInside.observedWeeklyChangeKg}`);
+  assert.equal(withOutside.observedWeeklyChangeKg, withNeither.observedWeeklyChangeKg, "one day older and it stops steering the verdict at all");
+  assert.equal(withOutside.observedWeeklyChangeKg, 0);
+});
+
+test("a long history with one recent weigh-in says THAT, not 'one weigh-in'", () => {
+  // The window makes this branch reachable for a new reason: years of data,
+  // nothing recent enough to be a trend. Telling that athlete they have one
+  // weigh-in is false and looks broken.
+  const entries = [...weekly("2026-02-06", [88, 87, 86, 85]), entry("2026-09-15", { weightKg: 84 })];
+  const p = progressVsGoal(entries, goal(), DEFAULT_ATHLETE, { today: TODAY });
+  assert.equal(p.status, "unknown");
+  assert.equal(p.observedWeeklyChangeKg, null);
+  assert.ok(!p.summary.includes("One weigh-in is a number"), `they have five: ${p.summary}`);
+  assert.match(p.summary, new RegExp(`${PROGRESS_WINDOW_DAYS} days`));
+});
+
+/* ─── the verdict's direction ────────────────────────────────────────────
+ *
+ * Defect: `direction` came from `requiredWeeklyChangeKg`, which
+ * `predictBodyComposition` recomputes from TODAY's weight — so it reads 0
+ * both for "hold this weight" and for "you already got there", and the
+ * fallback called both of them behind.
+ */
+
+test("an athlete who reached their target early is not told they are behind", () => {
+  const reached = weekly("2026-09-17", [76.2, 75.9, 75.6, 75.3, 75]);
+  const g = goal({ targetMetrics: { targetWeightKg: 75 }, targetDate: "2026-11-15" });
+  const p = progressVsGoal(reached, g, DEFAULT_ATHLETE, { today: TODAY });
+
+  assert.equal(p.requiredWeeklyChangeKg, 0, "standing on the target needs nothing per week — which is not the same as failing");
+  assert.equal(p.status, "ahead");
+  assert.ok(!/Needs 0 kg/.test(p.summary), `"Needs 0 kg a week" is not a sentence: ${p.summary}`);
+  assert.match(p.summary, /ease the deficit/);
+});
+
+test("half a kilo PAST a cut target still reads ahead, not behind", () => {
+  // Wider than the original claim: at 74.5 against 75 the required rate is a
+  // small POSITIVE number, which the old code read as a lean-gain goal being
+  // undershot and called behind.
+  const past = weekly("2026-09-17", [75.7, 75.4, 75.1, 74.8, 74.5]);
+  const p = progressVsGoal(past, goal({ targetMetrics: { targetWeightKg: 75 }, targetDate: "2026-11-15" }), DEFAULT_ATHLETE, { today: TODAY });
+  assert.ok(p.requiredWeeklyChangeKg! > 0, "the required rate now points the wrong way — which is why it cannot be the discriminator");
+  assert.equal(p.status, "ahead");
+});
+
+test("a genuine hold-a-weight goal still reads behind when it drifts, and never says 'Needs 0 kg'", () => {
+  // The control for the two above: start ON the target, drift off it. This
+  // one MUST stay behind — the fix must not buy the target-reached case by
+  // silencing real drift.
+  const drifting = weekly("2026-09-17", [75, 75.1, 75.2, 75.3]);
+  const g = goal({ targetMetrics: { targetWeightKg: 75 }, targetDate: "2027-06-25" });
+  const p = progressVsGoal(drifting, g, DEFAULT_ATHLETE, { today: TODAY });
+
+  assert.equal(p.status, "behind", "drifting off a weight you meant to hold is off plan in either direction");
+  assert.ok(Math.abs(p.requiredWeeklyChangeKg!) < 0.05, `required rounds away to nothing here (${p.requiredWeeklyChangeKg}) — the old summary printed it anyway`);
+  assert.ok(!/Needs 0 kg/.test(p.summary), `"Needs 0 kg a week from here" reached the athlete: ${p.summary}`);
+  assert.match(p.summary, /75 kg/);
+});
+
+test("a lean-gain goal that overshoots is told to ease the SURPLUS, not the deficit", () => {
+  const gaining = weekly("2026-09-17", [70, 70.3, 70.6, 70.9, 71.2]);
+  const p = progressVsGoal(gaining, goal({ targetMetrics: { targetWeightKg: 72 }, targetDate: "2026-11-15" }), DEFAULT_ATHLETE, { today: TODAY });
+  assert.equal(p.status, "ahead");
+  assert.ok(!p.summary.includes("deficit"), `a gaining athlete is not in a deficit: ${p.summary}`);
+  assert.match(p.summary, /surplus/);
 });

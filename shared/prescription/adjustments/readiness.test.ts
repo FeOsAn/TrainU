@@ -15,7 +15,7 @@ import {
   adjustWeek,
   emptyAthleteState,
 } from "../adjust";
-import { SHARPNESS_SHORTEN_FACTOR, applyReadiness, readinessActsOn, reportedThisMorning } from "./readiness";
+import { SHARPNESS_MIN_MINUTES, SHARPNESS_SHORTEN_FACTOR, applyReadiness, readinessActsOn, reportedThisMorning } from "./readiness";
 
 const MONDAY = "2026-09-14";
 const TUESDAY = "2026-09-15";
@@ -255,11 +255,88 @@ test("B3 — a taper blended with a cut is still a taper, and a loadMultiplier g
   assert.ok(!adjusted.sessions.some((s) => s.date === TUESDAY && s.kind === "run_easy" && s.adjustedFrom));
 });
 
-test("a session already at the floor for its kind is left alone rather than 'adjusted' by nothing", () => {
-  const week = synth("taper", [["run_threshold", TUESDAY, KIND_MINUTES.run_threshold.min]]);
+test("B3 — a low morning in a REAL taper week actually shortens the hard session", () => {
+  /*
+   * The defect this pins: `shortenedMinutes` ran its 70% cut back through
+   * `clampKind`, which raises anything under `KIND_MINUTES[kind].min` to that
+   * floor — and `PHASE_SHAPES.taper` has already sized every session in a
+   * race week to exactly that floor. So `round(40 × 0.7) = 28` came back out
+   * as 40, `shortenForSharpness` bailed on "no smaller than before", and
+   * `applyLowBand`'s sharpness branch `continue`d with no fallback. A low
+   * morning in taper produced ZERO adjustments: B3 was implemented and inert
+   * in the one phase it exists for, and the check-in screen told the athlete
+   * "nothing needed to change".
+   *
+   * It survived 568 green tests because every taper fixture in this file was
+   * hand-built by `synth` at 70 minutes — a length no taper week produces.
+   * So this test uses the real prescriber and asserts the minutes actually
+   * move, and the two after it pin the boundary either side.
+   */
+  const week = prescribe([goal({ targetDate: SUNDAY })]);
+  assert.equal(week.phaseName, "taper");
+  const before = week.sessions.find((s) => s.date === TUESDAY && s.intensity === "hard")!;
+  assert.ok(before, "the fixture must actually have hard work on today for this to mean anything");
+  assert.equal(
+    before.durationMinutes,
+    KIND_MINUTES[before.kind].min,
+    "…and it must sit at its kind floor, which is what a real taper week produces and what defeated the old clamp",
+  );
+
   const adjusted = run(week, state(TUESDAY, TAPS.low), TUESDAY);
-  assert.deepEqual(adjusted.adjustments, [], "no change happened, so nothing is reported as one");
-  assert.deepEqual(adjusted.sessions, week.sessions);
+
+  assert.equal(adjusted.adjustments.length, 1, "a low morning in race week must do something, and say so");
+  assert.equal(adjusted.adjustments[0]!.action, "shortened");
+  const after = adjusted.sessions.find((s) => s.date === TUESDAY)!;
+  assert.equal(after.kind, before.kind, "the kind is the one thing race week keeps");
+  assert.equal(after.intensity, "hard");
+  assert.ok(after.durationMinutes < before.durationMinutes, `minutes must really drop: ${before.durationMinutes} -> ${after.durationMinutes}`);
+  assert.equal(after.durationMinutes, SHARPNESS_MIN_MINUTES + 3, "40 minutes at 70% is 28, and 28 is above the sharpness floor");
+  assert.ok(after.tss < before.tss, "shorter means less load, priced by the same function");
+});
+
+test("B3 — the sharpness cut stops at its own floor, one case either side", () => {
+  // Above the floor: 35 × 0.7 = 24.5 → 25, exactly SHARPNESS_MIN_MINUTES.
+  const atFloor = run(
+    synth("taper", [["run_intervals", TUESDAY, 35]]),
+    state(TUESDAY, TAPS.low),
+    TUESDAY,
+  );
+  assert.equal(atFloor.sessions[0]!.durationMinutes, SHARPNESS_MIN_MINUTES);
+  assert.equal(atFloor.sessions[0]!.kind, "run_intervals");
+
+  // AT the floor already: there is genuinely nothing honest left to take off,
+  // so nothing is reported as a change. This is the no-op the old code
+  // claimed to be — it just applied to every real taper week instead of to
+  // the handful of sessions this short.
+  const nothingLeft = run(
+    synth("taper", [["run_intervals", TUESDAY, SHARPNESS_MIN_MINUTES]]),
+    state(TUESDAY, TAPS.low),
+    TUESDAY,
+  );
+  assert.deepEqual(nothingLeft.adjustments, [], "no change happened, so nothing is reported as one");
+});
+
+test("a shortened session outside race week is not told it is race week", () => {
+  /*
+   * `downgradeToday` falls back into `shortenForSharpness` whenever the easy
+   * version of a kind already sits on today — which happens in an ordinary
+   * base week in February. The sentence was hardcoded, so it told that
+   * athlete "This is race week".
+   */
+  const week = synth("base", [
+    ["run_intervals", THURSDAY, 50],
+    ["run_easy", THURSDAY, 45],
+    ["run_long", FRIDAY, 90],
+  ]);
+  const adjusted = run(week, state(THURSDAY, TAPS.low), THURSDAY);
+  const shortened = adjusted.adjustments.find((a) => a.action === "shortened")!;
+  assert.ok(shortened, "the collision forces a shorten rather than a downgrade");
+  assert.ok(!/race week|start line|taper/i.test(shortened.reason), `a base week claimed to be race week: ${shortened.reason}`);
+  assert.match(shortened.reason, /no easier version/, "and it says the true reason instead");
+
+  // …while a genuine taper still says what it means.
+  const taper = run(synth("taper", [["run_threshold", TUESDAY, 70]]), state(TUESDAY, TAPS.low), TUESDAY);
+  assert.match(taper.adjustments[0]!.reason, /This is race week/);
 });
 
 /* ─── The low band outside taper and peak ────────────────────────────────── */
@@ -415,6 +492,49 @@ test("a ticked hard session is neither moved nor downgraded by a low morning", (
   const adjusted = run(week, state(THURSDAY, TAPS.low, { answered }), THURSDAY);
   assert.deepEqual(adjusted.sessions, week.sessions);
   assert.deepEqual(adjusted.adjustments, []);
+});
+
+/* ─── Answered SLOTS, not just answered sessions ─────────────────────────── */
+
+test("a downgrade will not land on a (date, kind) the athlete has already ticked off", () => {
+  /*
+   * The defect this pins: `kindTakenOn` asked `week.sessions` only. The week
+   * is re-derived on every request, so a card the athlete answered may well
+   * no longer be IN it — and the downgrade then minted the same completion
+   * key a second time, re-attaching their old completion (and its snapshotted
+   * numbers) to a session they never did.
+   */
+  const week = synth("base", [
+    ["run_intervals", THURSDAY, 50],
+    ["run_long", FRIDAY, 90], // tomorrow is occupied, so the move route is closed
+  ]);
+  const answered = [sessionCompletionKey(THURSDAY, "run_easy")];
+  const adjusted = run(week, state(THURSDAY, TAPS.low, { answered }), THURSDAY);
+
+  const today = adjusted.sessions.find((s) => s.date === THURSDAY)!;
+  assert.equal(today.kind, "run_intervals", "the easy slot on today is spoken for, so it is shortened instead");
+  assert.ok(today.durationMinutes < 50, "…and something really did happen");
+  assert.equal(
+    adjusted.sessions.filter((s) => sessionCompletionKey(s.date, s.kind) === answered[0]).length,
+    0,
+    "nothing may be served on a key the athlete has already answered",
+  );
+});
+
+test("a day the athlete has already ticked something off on is not a free tomorrow", () => {
+  // `canMoveToTomorrow` tested `week.sessions` for tomorrow only. Moving a
+  // hard session onto a day they had already trained doubles that day — the
+  // exact thing the free-tomorrow rule exists to prevent.
+  const week = synth("base", [
+    ["run_intervals", THURSDAY, 50],
+    ["run_long", SATURDAY, 100],
+  ]);
+  const answered = [sessionCompletionKey(FRIDAY, "strength_lower")];
+  const adjusted = run(week, state(THURSDAY, TAPS.low, { answered }), THURSDAY);
+
+  assert.deepEqual(kindsOn(adjusted, FRIDAY), [], "nothing was stacked onto a day they had already trained");
+  const today = adjusted.sessions.find((s) => s.date === THURSDAY)!;
+  assert.equal(today.kind, "run_easy", "nowhere to move it to, so the intensity comes out instead");
 });
 
 /* ─── Properties ─────────────────────────────────────────────────────────── */

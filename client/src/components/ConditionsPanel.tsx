@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, todayStr } from "../lib/api";
+import { api, invalidateEngineAnswer, todayStr } from "../lib/api";
 import {
   BODY_PARTS,
   BODY_PART_LABELS,
@@ -13,6 +13,7 @@ import {
   SUGGESTED_RESTRICTIONS,
   crossTrainingAvailability,
   isSuspended,
+  type CrossTraining,
   type BodyPart,
   type Condition,
   type ConditionKind,
@@ -21,6 +22,7 @@ import {
 } from "@shared/conditions";
 import { EQUIPMENT_FIX_LABELS } from "@shared/prescription/adjustments/conditions";
 import type { Goal } from "@shared/goal";
+import { DEFAULT_FEATURE_PREFERENCES, type FeaturePreferences } from "@shared/preferences";
 
 /** What a completion tick hands over when the athlete said injury or illness. */
 export interface ConditionPrefill {
@@ -28,6 +30,69 @@ export interface ConditionPrefill {
   label: string;
   note: string | null;
   openedAt: string;
+}
+
+/*
+ * ─── What the two "what you can swap onto" boxes actually say ─────────────
+ *
+ * `crossTrainingAvailability` is an OR: a live triathlon or cycling goal
+ * makes `bike` true whatever the athlete stored. The boxes were bound
+ * `checked={available.bike}` and wrote `features.hasBike`, so for a
+ * triathlete they READ a derived value and WROTE a raw one: untick it, the
+ * preference goes false, the derived value stays true, and React puts the
+ * tick straight back. The control moved and changed nothing — and the engine
+ * kept prescribing rides to someone whose bike was in the shop, while the
+ * substitution's own reason string told them to tick this very box.
+ *
+ * Read and write now denote the same thing. Where a GOAL is what makes it
+ * true, the box says so in that goal's own words (never its discipline id —
+ * DECISIONS C7) and is not the athlete's to untick here; where it is their
+ * own answer, it is exactly their own answer.
+ *
+ * A fuller fix — an explicit "no" that OVERRIDES the goal — needs
+ * `FeaturePreferences.hasBike/hasPool` to become tri-state (`true` / `false`
+ * / `null` = "let my goals decide", the shape `BlockPreferences` already
+ * uses), because today a stored `false` is indistinguishable from "never
+ * answered". That is a change to `shared/preferences.ts`,
+ * `shared/conditions.ts` and the PATCH validator, which this pass does not
+ * own; see the report.
+ */
+export interface EquipmentChoice {
+  /** What the engine will do — the shared rule's own answer, not a second copy of it. */
+  checked: boolean;
+  /** The live goal that makes it true, in the athlete's words, or null when the answer is theirs. */
+  impliedBy: string | null;
+}
+
+/**
+ * Asked per goal, through the SAME shared rule, so neither the discipline
+ * predicate nor the "a past goal proves nothing" rule is re-spelled here.
+ *
+ * The athlete's own answers are reset to the DEFAULTS rather than to a
+ * hard-coded `false`, so if `hasBike`/`hasPool` ever become tri-state
+ * (`true` / `false` / `null` = "let my goals decide" — see the note above)
+ * this keeps asking what it means to ask: what would be true of someone who
+ * had never answered?
+ */
+function goalImplying(goals: Goal[], features: FeaturePreferences, today: string, need: keyof CrossTraining): string | null {
+  const unanswered: FeaturePreferences = {
+    ...features,
+    hasBike: DEFAULT_FEATURE_PREFERENCES.hasBike,
+    hasPool: DEFAULT_FEATURE_PREFERENCES.hasPool,
+  };
+  return goals.find((goal) => crossTrainingAvailability([goal], unanswered, today)[need])?.label ?? null;
+}
+
+export function equipmentChoices(
+  goals: Goal[],
+  features: FeaturePreferences,
+  today: string,
+): Record<keyof CrossTraining, EquipmentChoice> {
+  const resolved = crossTrainingAvailability(goals, features, today);
+  return {
+    bike: { checked: resolved.bike, impliedBy: goalImplying(goals, features, today, "bike") },
+    swim: { checked: resolved.swim, impliedBy: goalImplying(goals, features, today, "swim") },
+  };
 }
 
 /*
@@ -43,6 +108,22 @@ export function ConditionsPanel({ prefill, onPrefillUsed }: { prefill?: Conditio
   const { data: conditions } = useQuery({ queryKey: ["conditions"], queryFn: api.conditions });
   const { data: goals } = useQuery({ queryKey: ["goals"], queryFn: api.goals });
   const { data: preferences } = useQuery({ queryKey: ["preferences"], queryFn: api.preferences });
+
+  /*
+   * ONE list, three mutations.
+   *
+   * Opening an injury used to refetch `["conditions"]` and `["week"]` and not
+   * `["plan"]` — so the sessions turned to rest and the nutrition tile flipped
+   * Deficit → Maintenance while "Tradeoffs being made", which is fed only by
+   * `["plan"]`, went on showing the pre-injury list. The DECISIONS B5 sentence
+   * that EXPLAINS the flip ("your cut is paused while … is open") never
+   * reached the screen until a reload. Closing one had the mirror bug: the
+   * deficit resumed while the panel still blamed a healed condition.
+   *
+   * `invalidateEngineAnswer` owns the week/plan pair (see lib/api.ts) so the
+   * three lists here cannot drift apart again.
+   */
+  const invalidate = () => invalidateEngineAnswer(queryClient, ["conditions"]);
 
   const [formOpen, setFormOpen] = useState(false);
   const [kind, setKind] = useState<ConditionKind>("injury");
@@ -81,17 +162,13 @@ export function ConditionsPanel({ prefill, onPrefillUsed }: { prefill?: Conditio
       setBodyPart("");
       setRestrictions([]);
       onPrefillUsed?.();
-      queryClient.invalidateQueries({ queryKey: ["conditions"] });
-      queryClient.invalidateQueries({ queryKey: ["week"] });
+      invalidate();
     },
   });
 
   const closeIt = useMutation({
     mutationFn: ({ id, closedAt }: { id: string; closedAt: string | null }) => api.closeCondition(id, closedAt),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["conditions"] });
-      queryClient.invalidateQueries({ queryKey: ["week"] });
-    },
+    onSuccess: invalidate,
   });
 
   /*
@@ -102,24 +179,18 @@ export function ConditionsPanel({ prefill, onPrefillUsed }: { prefill?: Conditio
    */
   const confirmStillTrue = useMutation({
     mutationFn: (id: string) => api.patchCondition(id, {}),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["conditions"] });
-      queryClient.invalidateQueries({ queryKey: ["week"] });
-    },
+    onSuccess: invalidate,
   });
 
   const live = (conditions ?? []).filter((c) => c.closedAt === null);
-  const available = crossTrainingAvailability(goals ?? [], preferences?.features ?? { physiqueTracking: false, hasBike: false, hasPool: false }, today);
+  const equipmentBoxes = equipmentChoices(goals ?? [], preferences?.features ?? DEFAULT_FEATURE_PREFERENCES, today);
 
   // Both of these are load-bearing for the engine, not a nicety: with no bike
   // and no pool, every session an injury forbids becomes rest rather than a
   // swap, and the reason string tells the athlete to tick exactly this box.
   const equipment = useMutation({
     mutationFn: (patch: { hasBike?: boolean; hasPool?: boolean }) => api.patchFeatures(patch),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["preferences"] });
-      queryClient.invalidateQueries({ queryKey: ["week"] });
-    },
+    onSuccess: () => invalidateEngineAnswer(queryClient, ["preferences"]),
   });
 
   return (
@@ -213,14 +284,18 @@ export function ConditionsPanel({ prefill, onPrefillUsed }: { prefill?: Conditio
 
           <div className="section-label" style={{ marginBottom: 6 }}>What you can swap onto</div>
           <div style={{ marginBottom: 12 }}>
-            <label className="check-row">
-              <input type="checkbox" checked={available.bike} disabled={equipment.isPending} onChange={(e) => equipment.mutate({ hasBike: e.target.checked })} />
-              <span>{EQUIPMENT_FIX_LABELS.bike}</span>
-            </label>
-            <label className="check-row">
-              <input type="checkbox" checked={available.swim} disabled={equipment.isPending} onChange={(e) => equipment.mutate({ hasPool: e.target.checked })} />
-              <span>{EQUIPMENT_FIX_LABELS.swim}</span>
-            </label>
+            <EquipmentBox
+              choice={equipmentBoxes.bike}
+              label={EQUIPMENT_FIX_LABELS.bike}
+              pending={equipment.isPending}
+              onChange={(checked) => equipment.mutate({ hasBike: checked })}
+            />
+            <EquipmentBox
+              choice={equipmentBoxes.swim}
+              label={EQUIPMENT_FIX_LABELS.swim}
+              pending={equipment.isPending}
+              onChange={(checked) => equipment.mutate({ hasPool: checked })}
+            />
             <div className="tiny muted" style={{ lineHeight: 1.5 }}>
               Without one of these, a session your injury rules out becomes rest rather than a swap.
             </div>
@@ -234,6 +309,40 @@ export function ConditionsPanel({ prefill, onPrefillUsed }: { prefill?: Conditio
         </div>
       )}
     </div>
+  );
+}
+
+function EquipmentBox({
+  choice,
+  label,
+  pending,
+  onChange,
+}: {
+  choice: EquipmentChoice;
+  label: string;
+  pending: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  const locked = choice.impliedBy !== null;
+  return (
+    <>
+      <label className="check-row">
+        <input
+          type="checkbox"
+          checked={choice.checked}
+          // Not "greyed out for neatness": a box that springs back when you
+          // tap it is a worse answer than one that says who is holding it.
+          disabled={pending || locked}
+          onChange={(e) => onChange(e.target.checked)}
+        />
+        <span>{label}</span>
+      </label>
+      {locked && (
+        <div className="tiny muted" style={{ marginBottom: 6, lineHeight: 1.5 }}>
+          “{choice.impliedBy}” already assumes it, so the plan works on that — change the goal to change this.
+        </div>
+      )}
+    </>
   );
 }
 

@@ -100,11 +100,27 @@ export interface Split {
   note: string;
 }
 
+/**
+ * Every clock here is elapsed from the RACE start; only `decisionAtKm` is
+ * leg-relative, and it says so. The meaning is written down because the first
+ * version of this file assumed it across a module boundary and got it wrong:
+ * the triathlon handed the run leg's total to a sentence that says "brings you
+ * home in", promising a 1:45 finish to a five-hour race. A number crossing a
+ * boundary needs its meaning attached, not assumed — the same rule
+ * `Measured<T>` and `FRESH_KM_TO_THRESHOLD` encode.
+ */
 export interface BailOut {
+  /** Pace to hold for the REST OF THE LEG the decision is made in. */
   paceSecPerKm: number;
   paceFormatted: string;
+  /** Distance into the leg named by the trigger — for a single-leg race, into the race. */
   decisionAtKm: number;
+  /** Elapsed from the RACE start at the decision point: what the athlete's watch will read there. */
+  elapsedAtDecisionSeconds: number;
+  elapsedAtDecisionFormatted: string;
+  /** How far behind that checkpoint triggers it — a share of the WHOLE race, in every discipline. */
   behindBySeconds: number;
+  /** Elapsed from the RACE start at the finish line, if the bail-out is taken. */
   finishSeconds: number;
   finishFormatted: string;
   /** The whole rule in one sentence, with real numbers in it. */
@@ -262,7 +278,15 @@ export type PacingResult = PacingPlan | PacingUnavailable;
 export interface PacingOptions {
   /** The day the plan is derived for. Defaults to today — this module reads no clock of its own. */
   today?: string;
-  /** Force the basis instead of letting the stretch-tolerance rule decide. */
+  /**
+   * Force the basis instead of letting the stretch-tolerance rule decide.
+   *
+   * A caller's option, NOT something the reason strings may advertise: the
+   * predicted-basis sentence used to end "You can override this and plan to
+   * the target anyway" while no screen could request it, sending the athlete
+   * hunting for a button nobody had wired up. Anything here becomes a promise
+   * only once something the athlete can press sends it.
+   */
   basis?: PacingBasis;
   /** An ephemeral "what if I went for X" — never persisted, never written to the goal. */
   targetSecondsOverride?: number | null;
@@ -445,7 +469,7 @@ export function chooseBasis(
     basis: "predicted",
     reason: `Your target of ${formatClock(targetSeconds)} is ${gapPct}% ahead of the predicted ${formatClock(
       predictedSeconds,
-    )}, and the most your numbers support stretching is ${tolerancePct}%${measuredNote} — so the plan is built to the prediction. Going out at target pace is the most common way to lose ten minutes in the last quarter. You can override this and plan to the target anyway.`,
+    )}, and the most your numbers support stretching is ${tolerancePct}%${measuredNote} — so the plan is built to the prediction. Going out at target pace is the most common way to lose ten minutes in the last quarter.`,
     tolerancePct,
     gapPct,
     planSeconds: predictedSeconds,
@@ -524,26 +548,44 @@ export function buildSplits(totalSeconds: number, distanceKm: number, splitKm: n
  * the day goes well, and the athlete improvises the worst decision of the
  * race under the most fatigue.
  */
-function bailOutFor(splits: Split[], distanceKm: number, planSeconds: number, legLabel: string): BailOut {
-  const meanPace = planSeconds / distanceKm;
+function bailOutFor(
+  splits: Split[],
+  distanceKm: number,
+  legSeconds: number,
+  legLabel: string,
+  /**
+   * Everything already on the clock when this leg starts — 0 for a race that
+   * IS the leg, swim + T1 + bike + T2 for a triathlon's run. Without it the
+   * checkpoint and the finish are leg-relative numbers in a race-relative
+   * sentence, which is what shipped.
+   */
+  elapsedBeforeLegSeconds = 0,
+): BailOut {
+  const meanPace = legSeconds / distanceKm;
   const paceSecPerKm = Math.round(meanPace * (1 + BAIL_OUT_SLOWDOWN));
   const boundaries = splits.slice(0, -1).map((s) => s.toKm);
   const half = distanceKm / 2;
   const decisionAtKm = boundaries.length > 0 ? boundaries.reduce((best, km) => (Math.abs(km - half) < Math.abs(best - half) ? km : best), boundaries[0]) : half;
   const atDecision = splits.find((s) => Math.abs(s.toKm - decisionAtKm) < 1e-9);
-  const cumulativeAtDecision = atDecision ? atDecision.cumulativeSeconds : Math.round(planSeconds / 2);
-  const behindBySeconds = Math.round(planSeconds * BAIL_OUT_TRIGGER_FRACTION);
-  const finishSeconds = Math.round(cumulativeAtDecision + behindBySeconds + (distanceKm - decisionAtKm) * paceSecPerKm);
+  const legCumulativeAtDecision = atDecision ? atDecision.cumulativeSeconds : Math.round(legSeconds / 2);
+  const elapsedAtDecisionSeconds = Math.round(elapsedBeforeLegSeconds + legCumulativeAtDecision);
+  // "Behind" is the same share of the same race in every discipline. Taking
+  // it off the LEG instead made a triathlon's band a third of a marathon's,
+  // firing the bail-out on a minute of drift across five hours.
+  const behindBySeconds = Math.round((elapsedBeforeLegSeconds + legSeconds) * BAIL_OUT_TRIGGER_FRACTION);
+  const finishSeconds = Math.round(elapsedAtDecisionSeconds + behindBySeconds + (distanceKm - decisionAtKm) * paceSecPerKm);
   return {
     paceSecPerKm,
     paceFormatted: formatPace(paceSecPerKm),
     decisionAtKm: Math.round(decisionAtKm * 1000) / 1000,
+    elapsedAtDecisionSeconds,
+    elapsedAtDecisionFormatted: formatClock(elapsedAtDecisionSeconds),
     behindBySeconds,
     finishSeconds,
     finishFormatted: formatClock(finishSeconds),
     trigger: `At ${formatKm(decisionAtKm)} km${legLabel}: if you are more than ${formatClock(behindBySeconds)} behind ${formatClock(
-      cumulativeAtDecision,
-    )}, stop chasing it and settle into ${formatPace(paceSecPerKm)} for the rest. That still brings you home in ${formatClock(
+      elapsedAtDecisionSeconds,
+    )} on the clock, stop chasing it and settle into ${formatPace(paceSecPerKm)} for the rest. That still brings you home in ${formatClock(
       finishSeconds,
     )}, which is a race you finish rather than a race you walk.`,
   };
@@ -767,7 +809,10 @@ function planTriathlon(goal: Goal, a: AthleteParams, calibrationMultiplier: numb
 
   const runSplitKm = splitKmFor(distances.runKm);
   const runSplits = buildSplits(runSeconds, distances.runKm, runSplitKm, runProfile);
-  const bailOut = bailOutFor(runSplits, distances.runKm, runSeconds, " into the run");
+  // The run leg does not start the clock again: the decision point and the
+  // finish are both elapsed from the gun, so the checkpoint is the number the
+  // athlete's watch will actually be showing when they have to make the call.
+  const bailOut = bailOutFor(runSplits, distances.runKm, runSeconds, " into the run", swimSeconds + t1 + bikeSeconds + t2);
   const seeds = seedsFrom(prediction.confidence, a);
   const seedWarning = seedWarningFor(seeds, prediction.confidence);
 
@@ -947,6 +992,8 @@ function planHyrox(goal: Goal, a: AthleteParams, calibrationMultiplier: number, 
     paceSecPerKm: bailPace,
     paceFormatted: formatPace(bailPace),
     decisionAtKm: 4,
+    elapsedAtDecisionSeconds: decisionCumulative,
+    elapsedAtDecisionFormatted: formatClock(decisionCumulative),
     behindBySeconds,
     finishSeconds: bailFinish,
     finishFormatted: formatClock(bailFinish),

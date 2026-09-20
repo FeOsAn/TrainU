@@ -6,7 +6,7 @@ import type { Goal } from "../goal";
 import { arbitrateWeek } from "../arbitration/arbitrate";
 import { prescribeWeek } from "./prescribe";
 import { KIND_MINUTES } from "./templates";
-import type { PrescribedWeek } from "./sessionKinds";
+import { type PrescribedWeek, sessionCompletionKey } from "./sessionKinds";
 import {
   ACWR_CEILING,
   ACWR_MIN_CHRONIC_WEEKLY_TSS,
@@ -173,6 +173,86 @@ test("the mutators refuse an answered session themselves, and report that they d
   const changed = adjustSessionAt(working, 0, { durationMinutes: 20 }, { reason: "x", source: "condition" }, answered);
   assert.equal(changed, false);
   assert.deepEqual(working.sessions[0], week.sessions[0]);
+});
+
+test("a mutator may not LAND a session on a key the athlete has already answered", () => {
+  /*
+   * The defect this pins: `adjustSessionAt` tested `isAnswered` on the
+   * session BEFORE the patch. Every mutation that changes `kind` or `date` —
+   * a forbidden-kind substitution, a downgrade, a move to tomorrow — mints a
+   * NEW completion key, and nothing looked at whether THAT key was already
+   * answered.
+   *
+   * What it costs the athlete: their Wednesday run is substituted to an
+   * Endurance ride by an open calf strain, they ride it and tick Done, which
+   * writes `2026-09-16#bike_endurance` with that session snapshotted. The
+   * week re-derives (a second goal, a change of days per week) and a
+   * different run lands on Wednesday; the strain is still open, so it is
+   * substituted onto the SAME key with different numbers.
+   * `weekService.buildWeek` attaches the old completion by key alone, so the
+   * Plan page renders the new session already ticked Done, adherence counts a
+   * session nobody did, and the card's numbers no longer match the snapshot
+   * the athlete recorded against.
+   *
+   * Every existing answered-session test above asserts only the SOURCE
+   * direction — "an answered session is immune" — which is why 568 green
+   * tests missed the destination.
+   */
+  const week = prescribe();
+  const working: WorkingWeek = { ...week, sessions: [...week.sessions], dropped: [] };
+  const source = week.sessions[0]!;
+  const destinationKind = "bike_endurance" as const;
+  const answered = state({ answeredKeys: [sessionCompletionKey(source.date, destinationKind)] });
+
+  // The session being changed is NOT answered, so the old guard let it through.
+  assert.equal(answered.answeredKeys.includes(sessionKey(source)), false);
+
+  const changed = adjustSessionAt(
+    working,
+    0,
+    { kind: destinationKind, durationMinutes: 54 },
+    { reason: "x", source: "condition" },
+    answered,
+  );
+  assert.equal(changed, false, "the slot is spoken for — the athlete already ticked a card on that key");
+  assert.deepEqual(working.sessions[0], source, "and nothing was changed on the way to finding that out");
+
+  // The boundary either side: the same patch onto a FREE key is still allowed.
+  const free = state({ answeredKeys: [sessionCompletionKey(addDays(source.date, 1), destinationKind)] });
+  assert.equal(
+    adjustSessionAt(working, 0, { kind: destinationKind, durationMinutes: 54 }, { reason: "x", source: "condition" }, free),
+    true,
+    "an unanswered destination is untouched by this guard",
+  );
+  assert.equal(working.sessions[0]!.kind, destinationKind);
+});
+
+test("the layer catches a landing on an answered key even when a slice bypasses the mutators", () => {
+  // The backstop half: `answeredViolation` iterated `before.sessions` only,
+  // so it could see an answered session being changed or removed and
+  // structurally could NOT see one landing on a key `before` did not hold.
+  const week = prescribe();
+  const source = week.sessions[0]!;
+  const answered = state({ answeredKeys: [sessionCompletionKey(source.date, "bike_endurance")] });
+
+  const lander: Modulator = (w) => {
+    w.sessions[0] = { ...w.sessions[0]!, kind: "bike_endurance" };
+    return w;
+  };
+
+  const problems: string[] = [];
+  const adjusted = adjustWeek(week, answered, MONDAY, {
+    modulators: only("conditions", lander),
+    onProblem: (m) => problems.push(m),
+  });
+  assert.deepEqual(adjusted.sessions, week.sessions, "the whole step is rolled back rather than serving a pre-ticked card");
+  assert.equal(problems.length, 1);
+  assert.match(problems[0]!, /already answered/);
+
+  assert.throws(
+    () => adjustWeek(week, answered, MONDAY, { strict: true, modulators: only("conditions", lander) }),
+    /already answered/,
+  );
 });
 
 test("an answered session keeps its load even when the ceiling has to cut the week", () => {

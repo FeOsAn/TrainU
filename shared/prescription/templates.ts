@@ -373,25 +373,33 @@ export function rpeFor(kind: SessionKind): number {
 }
 
 /**
- * Converting a session's DURATION when it is substituted across sports, so
- * the substitute carries the same training LOAD rather than the same clock
- * time.
+ * The exchange rate between sports BY ENERGY COST, derived from
+ * `SPORT_FALLBACK_PER_MIN` (shared/trainingLoad.ts) rather than restating
+ * it: a minute of running is 0.85, a minute of riding 0.70, a minute of
+ * swimming 0.50. Read it as: minutes_to = minutes_from ×
+ * SPORT_EQUIVALENCE[from][to].
  *
- * Minutes are not load. `SPORT_FALLBACK_PER_MIN` (shared/trainingLoad.ts,
- * the same table that prices a logged session when nothing better exists)
- * says a minute of running is 0.85, a minute of riding 0.70 and a minute of
- * swimming 0.50. So swapping a 60-minute run for a 60-minute ride quietly
- * removes 18% of the week's stress, and swapping it for a swim removes 41% —
- * a "substitution" that is really an unannounced rest day.
+ * WHAT IT IS NOT, and this is the important half: the currency a PRESCRIBED
+ * session is priced in. `buildSession` prices every planned session with
+ * `estimateSessionTss({ sport, durationMinutes, rpe })` and no heart rate,
+ * pace or power — which falls through to `rpeTss()`, and `rpeTss` is
+ * sport-BLIND. Sixty minutes at RPE 4 is 33 planned TSS for a run, a ride
+ * and a swim alike. The `SPORT_FALLBACK_PER_MIN` branch these numbers come
+ * from is unreachable for anything the prescriber emits.
  *
- * Derived from that table rather than restated, because two tables of the
- * same exchange rates is exactly the drift this file exists to prevent.
- * Read it as: minutes_to = minutes_from × SPORT_EQUIVALENCE[from][to].
+ * So this table must never size a substitute. It used to: a 52-minute easy
+ * run became a 63-minute ride carrying 21% MORE planned TSS than the session
+ * it replaced, and an injured athlete's week came out longer and more
+ * expensive than a healthy one's. Two exchange rates for the same quantity
+ * is the drift this file exists to prevent, and when they disagree the one
+ * the week is actually denominated in wins. Substitution therefore sizes on
+ * VOLUME — see `substituteMinutes` in
+ * shared/prescription/adjustments/conditions.ts.
  *
- * A word of honesty about the numbers: they equate ENERGY COST, not
- * specificity. An hour of riding is not an hour of running for a marathoner
- * no matter how the arithmetic comes out — which is why substitution is a
- * fallback for an injured athlete, never an optimisation.
+ * It stays declared because it remains a true statement about a LOGGED
+ * session that arrived with nothing but a duration, which is the one place
+ * `SPORT_FALLBACK_PER_MIN` really does price the work. A test pins the
+ * disagreement so nobody re-derives the bug from the doc comment.
  */
 export const SPORT_EQUIVALENCE: Record<PlannedSport, Record<PlannedSport, number>> = (() => {
   const sports: PlannedSport[] = ["run", "bike", "swim", "strength", "hybrid", "station", "other"];
@@ -404,14 +412,3 @@ export const SPORT_EQUIVALENCE: Record<PlannedSport, Record<PlannedSport, number
   }
   return table;
 })();
-
-/**
- * The minutes of `toKind` that carry the same load as `minutes` of
- * `fromKind`, clamped to what that kind plausibly is. Clamped here rather
- * than by the caller so a substitute can never come back as a 12-minute
- * swim or a four-hour ride.
- */
-export function equivalentMinutes(fromKind: SessionKind, toKind: SessionKind, minutes: number): number {
-  const factor = SPORT_EQUIVALENCE[SPORT_OF[fromKind]][SPORT_OF[toKind]];
-  return clampKind(toKind, minutes * factor);
-}

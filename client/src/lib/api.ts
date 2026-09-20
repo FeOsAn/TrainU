@@ -1,3 +1,4 @@
+import type { QueryClient } from "@tanstack/react-query";
 import type { AthleteParams } from "@shared/athlete";
 import type { Goal, GoalType, Discipline } from "@shared/goal";
 import type { TrainingSession } from "@shared/session";
@@ -200,6 +201,33 @@ export const api = {
   syncGarmin: () => request<{ fetched: number; inserted: number; skippedDuplicates: number; error?: string }>("/api/connectors/garmin/sync", { method: "POST" }),
   syncWhoop: () => request<{ fetched: number; inserted: number; skippedDuplicates: number; error?: string }>("/api/connectors/whoop/sync", { method: "POST" }),
 };
+
+/*
+ * ─── What re-derives when a training input changes ────────────────────────
+ *
+ * `["week"]` carries the sessions, the per-day macros and the resolved
+ * nutrition stance. `["plan"]` carries the conflicts that EXPLAIN them: the
+ * DECISIONS B5 sentence — "your cut is paused while the calf strain is open"
+ * — is emitted only as a `GoalConflict`, and only `GET /api/plan/arbitrate`
+ * returns those. Invalidating one without the other changes what the athlete
+ * is told to do while withholding the reason, which is the exact failure the
+ * conflict channel exists to prevent.
+ *
+ * So the pair travels TOGETHER, out of ONE list, rather than being re-listed
+ * at every mutation — three hand-written copies is how logging an injury came
+ * to refetch the week and not the explanation.
+ */
+export const ENGINE_ANSWER_KEYS: ReadonlyArray<ReadonlyArray<string>> = [["week"], ["plan"]];
+
+/** Invalidate both halves of the engine's answer, plus whatever else this change touched. */
+export function invalidateEngineAnswer(
+  queryClient: QueryClient,
+  ...alsoInvalidate: ReadonlyArray<ReadonlyArray<string>>
+): void {
+  for (const key of [...ENGINE_ANSWER_KEYS, ...alsoInvalidate]) {
+    queryClient.invalidateQueries({ queryKey: [...key] });
+  }
+}
 
 export function formatPace(secPerKm: number | null | undefined): string {
   if (!secPerKm) return "—";

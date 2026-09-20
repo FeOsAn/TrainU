@@ -20,6 +20,7 @@ import {
 } from "./profiles";
 import {
   type HyroxPacingPlan,
+  type PacingPlan,
   type PacingResult,
   type RunPacingPlan,
   type TriathlonPacingPlan,
@@ -173,6 +174,50 @@ test("the bail-out names a decision point near halfway and a pace that still fin
   assert.ok(plan.bailOut.behindBySeconds > 0);
 });
 
+test("every discipline's bail-out is a WHOLE-RACE clock, not the clock of the leg it is decided in", () => {
+  // Defect: `planTriathlon` handed `bailOutFor` the RUN LEG's total, so
+  // `BailOut.finishSeconds` meant "race finish" for a marathon and "run split"
+  // for a triathlon — while the sentence built around it says "brings you home
+  // in". A 70.3 athlete was promised a 1:45:31 finish to a 5:03:48 race, and a
+  // 48:49 checkpoint their watch (reading ~4:10:55 there) would never show.
+  // The old suite pinned `finishSeconds > planSeconds` for the marathon ONLY,
+  // so the fixtures agreed with the bug; this runs it over every discipline so
+  // a fourth cannot be added without satisfying it.
+  const plans: PacingPlan[] = [
+    runPlan(goal({ targetMetrics: { targetDistanceKm: MARATHON_KM } })),
+    triPlan(goal({ discipline: "triathlon", label: "Ironman 70.3", targetMetrics: { targetDistanceKm: 113 } })),
+    hyroxPlan(goal({ type: "hyrox", discipline: "other", targetMetrics: {} })),
+  ];
+  for (const plan of plans) {
+    assert.ok(
+      plan.bailOut.finishSeconds > plan.planSeconds,
+      `${plan.discipline}: bailing out costs time, and the number it reports must be the RACE finish — got ${plan.bailOut.finishFormatted} against a plan of ${plan.planFormatted}`,
+    );
+  }
+  for (const plan of plans) {
+    assert.ok(plan.bailOut.elapsedAtDecisionSeconds < plan.bailOut.finishSeconds, `${plan.discipline}: the decision point comes before the finish`);
+    assert.ok(plan.bailOut.trigger.includes(plan.bailOut.finishFormatted), `${plan.discipline}: the sentence must quote the number the field carries`);
+    assert.ok(plan.bailOut.trigger.includes(plan.bailOut.elapsedAtDecisionFormatted), `${plan.discipline}: the checkpoint in words must be the checkpoint in the field`);
+  }
+
+  // The property that actually pins leg-vs-race: the triathlon's checkpoint is
+  // what the athlete's watch reads, so it sits past everything in front of the
+  // run rather than starting the clock again at T2.
+  const tri = plans[1] as TriathlonPacingPlan;
+  const beforeRun = tri.swim.seconds + tri.t1.seconds + tri.bike.seconds + tri.t2.seconds;
+  assert.ok(
+    tri.bailOut.elapsedAtDecisionSeconds > beforeRun,
+    `the run-leg decision point must be total elapsed (${tri.bailOut.elapsedAtDecisionSeconds}s), not run-leg elapsed, against ${beforeRun}s already spent`,
+  );
+  // "Behind" must mean the same share of the same race in all three: 1% of a
+  // run leg is a third of 1% of the triathlon it sits inside, which fired the
+  // bail-out on a minute of drift in a five-hour day.
+  assert.ok(
+    Math.abs(tri.bailOut.behindBySeconds - tri.planSeconds * 0.01) < 1,
+    `the trigger band is a share of the whole race, got ${tri.bailOut.behindBySeconds}s against ${tri.planSeconds}s`,
+  );
+});
+
 // ─── The basis rule ──────────────────────────────────────────────────────────
 
 test("a target inside tolerance is what the plan is built to; beyond it, the prediction wins", () => {
@@ -185,7 +230,32 @@ test("a target inside tolerance is what the plan is built to; beyond it, the pre
   const far = chooseBasis(Math.round(predicted * 0.85), predicted, { verifiedCount: 1, totalCount: 1, unverifiedFields: [] }, 1);
   assert.equal(far.basis, "predicted");
   assert.ok(far.reason.includes("%"), "the athlete is told the gap and the tolerance, not just overruled");
-  assert.ok(far.reason.includes("override"), "a forced override must be offered in words");
+});
+
+test("no pacing sentence offers the athlete a control the app does not have", () => {
+  // Defect: the predicted-basis reason ended "You can override this and plan
+  // to the target anyway." The override is real in `PacingOptions.basis`, but
+  // nothing in the client can request it — `api.pacingFor` has no call sites —
+  // so the athlete hunted for a button that was never wired up. The capability
+  // stays available to callers; the PROMISE of a control goes, until there is
+  // one. A confident wrong statement is the failure `Measured<T>` exists to
+  // prevent, and it applies to prose as much as to numbers.
+  const far = chooseBasis(10000, 12600, { verifiedCount: 1, totalCount: 1, unverifiedFields: [] }, 1);
+  assert.equal(far.basis, "predicted");
+
+  const prose: string[] = [far.reason];
+  for (const g of [
+    goal({ targetMetrics: { targetDistanceKm: MARATHON_KM, targetTimeSeconds: 9000 } }),
+    goal({ discipline: "triathlon", targetMetrics: { targetDistanceKm: 113, targetTimeSeconds: 12000 } }),
+    goal({ type: "hyrox", discipline: "other", targetMetrics: { targetTimeSeconds: 3000 } }),
+  ]) {
+    const plan = pacingPlan(g, DEFAULT_ATHLETE, 1, OPTS);
+    assert.ok(plan.available);
+    prose.push(plan.basisReason, ...plan.reasons);
+  }
+  for (const sentence of prose) {
+    assert.equal(/\boverrid/i.test(sentence), false, `promises a control that does not exist: ${sentence}`);
+  }
 });
 
 test("a seeded prediction gives the athlete's own target more room than a measured one", () => {

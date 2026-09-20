@@ -66,6 +66,7 @@ import {
   type AdjustmentSource,
   type PlannedSession,
   type PrescribedWeek,
+  SESSION_KINDS,
   type SessionKind,
   sessionCompletionKey,
 } from "./sessionKinds";
@@ -309,6 +310,33 @@ export function isAnswered(session: PlannedSession, state: AthleteState): boolea
   return state.answeredKeys.includes(sessionKey(session));
 }
 
+/**
+ * Has the athlete already answered the card at this (date, kind)?
+ *
+ * Asked about a SLOT rather than about a session, because the slot is what a
+ * mutator moves INTO. `isAnswered` can only ever speak about the session
+ * being changed; every patch that alters `kind` or `date` produces a key
+ * nothing had looked at.
+ *
+ * The completion key is opaque by contract, so this CONSTRUCTS the key it
+ * wants rather than parsing `answeredKeys` apart — one mechanism for making
+ * a key, in the file that declares it.
+ */
+export function isKeyAnswered(state: AthleteState, date: string, kind: SessionKind): boolean {
+  return state.answeredKeys.includes(sessionCompletionKey(date, kind));
+}
+
+/**
+ * Every kind the athlete has already answered on this date.
+ *
+ * What a slice needs to decide a slot is OCCUPIED before it picks it: an
+ * in-week `taken` list built from `week.sessions` alone says a day is free
+ * when the athlete has already trained and ticked it off.
+ */
+export function answeredKindsOn(state: AthleteState, date: string): SessionKind[] {
+  return SESSION_KINDS.filter((kind) => isKeyAnswered(state, date, kind));
+}
+
 function clone<T>(value: T): T {
   return structuredClone(value);
 }
@@ -371,7 +399,25 @@ function stableJson(value: unknown): string {
   );
 }
 
-/** The key of the first answered session the step changed or removed, or null if it left them all alone. */
+/**
+ * The key of the first answered card the step broke, or null if it left them
+ * all alone.
+ *
+ * TWO directions, because an answered completion can be invalidated from
+ * either end and only one of them was ever checked:
+ *
+ *  - a session the athlete answered being CHANGED or REMOVED, and
+ *  - a session LANDING on an answered key that `before` did not hold.
+ *
+ * The second is the one that produced a plausible wrong card: every mutation
+ * that alters `kind` or `date` mints a new completion key, and a substituted
+ * ride landing on a key the athlete had already ticked Done made
+ * `weekService` attach the OLD completion to the NEW session — the Plan page
+ * rendering a session as already done that nobody did, with numbers that no
+ * longer match the snapshot the athlete recorded against, and adherence
+ * counting it. Checking only `before.sessions` structurally cannot see that,
+ * which is why it needed someone to predict which mutator does it.
+ */
 function answeredViolation(before: WorkingWeek, after: WorkingWeek, state: AthleteState): string | null {
   const answered = new Set(state.answeredKeys);
   const afterByKey = new Map(after.sessions.map((s) => [sessionKey(s), s]));
@@ -381,6 +427,12 @@ function answeredViolation(before: WorkingWeek, after: WorkingWeek, state: Athle
     const now = afterByKey.get(key);
     if (!now) return key;
     if (stableJson(now) !== stableJson(session)) return key;
+  }
+
+  const held = new Set(before.sessions.map(sessionKey));
+  for (const session of after.sessions) {
+    const key = sessionKey(session);
+    if (answered.has(key) && !held.has(key)) return key;
   }
   return null;
 }
@@ -551,6 +603,12 @@ export function adjustSessionAt(
 ): boolean {
   const session = week.sessions[index];
   if (!session || isAnswered(session, state)) return false;
+  // Both ENDS of the move, not just the one being left. A patch that changes
+  // `kind` or `date` mints a new completion key, and landing on a key the
+  // athlete has already answered silently re-attaches their old completion —
+  // and its snapshotted numbers — to a session they never did.
+  const nextKey = sessionCompletionKey(patch.date ?? session.date, patch.kind ?? session.kind);
+  if (nextKey !== sessionKey(session) && state.answeredKeys.includes(nextKey)) return false;
   week.sessions[index] = adjustSession(session, patch, change, state.params);
   return true;
 }
@@ -559,6 +617,10 @@ export function adjustSessionAt(
  * Take a session out of the week, keeping it (with its reason) in `dropped`
  * so it can still be rendered and still be ticked off by an athlete who did
  * it anyway.
+ *
+ * No destination-key guard here, unlike `adjustSessionAt`: this takes no
+ * patch, so the session keeps its date and its kind and there is no second
+ * key for it to land on.
  */
 export function dropSessionAt(week: WorkingWeek, index: number, change: SessionChange, state: AthleteState): boolean {
   const session = week.sessions[index];

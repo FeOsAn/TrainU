@@ -540,6 +540,84 @@ causes a support conversation.
   file-serving path on a volume is its own piece of work. Measurements and the
   trend are there.
 
+- **Phase 10 review (done)** — 18,224 lines written by parallel agents in one
+  pass, with 568 green tests and a clean `tsc`, were put through six
+  adversarial review dimensions; every claim was then attacked by a separate
+  verifier whose default was to REFUTE it, several of whom ran the
+  reproduction before agreeing. **32 of 35 claims survived. 14 were high.**
+  The point of the exercise: the bugs that reach production are the ones the
+  tests were written to agree with.
+
+  **The worst cluster was coaching, not code — an injury made the week
+  HARDER.** Four findings, one failure:
+  - Every cross-sport substitution handed back MORE load than the session it
+    replaced, because `SPORT_EQUIVALENCE` converts between sports in a
+    currency (`SPORT_FALLBACK_PER_MIN`) that prices nothing the prescriber
+    emits — `buildSession` → `estimateSessionTss` → `rpeTss`, which is
+    sport-blind. Substitutes now carry the original's VOLUME, then the
+    severity dose. `equivalentMinutes` is deleted; `SPORT_EQUIVALENCE` keeps
+    a comment saying at length why it must never size a substitute.
+  - A `KIND_MINUTES` floor then discarded the severity dose entirely, so
+    severity 1, 2 and 3 all produced an identical 45-minute ride — **while the
+    card narrated the arithmetic that had not happened** ("85% — a substitute
+    for a severity-2 injury"). A test now parses every number out of a
+    substitution note and checks the claim against the session that was
+    actually built.
+  - A `continue` skipped the illness dose for any session a restriction also
+    ruled out, so adding an illness to an injury *increased* the training.
+    Now 151/255 min alone → 128 min together.
+  - The return-to-training ramp was sized by how long the RECORD was open, so
+    a note nobody closed earned a three-week ramp having cost no training.
+
+  The group invariant, pinned across 4 weeks × 4 equipment combinations × 57
+  condition scenarios: **no condition ever buys the athlete more training.**
+  Under the old code it failed on the first scenario (365 min against a
+  healthy 301).
+
+  **Archetype 1 again, found independently by three dimensions**: a
+  *suspended* condition — 28 days untouched, greyed out on screen asking "is
+  this still true?", changing zero sessions — still forced the nutrition
+  stance to maintenance indefinitely. The only escape was closing a record the
+  app had already stopped trusting. `arbitrate.ts` read `isOpenOn` directly
+  instead of `conditionsOn`, which is where staleness lives: two definitions
+  of "open", and the plan and the nutrition used different ones. Every
+  condition fixture in the suite had a recent `updatedAt`, which is exactly
+  why 568 tests were green.
+
+  **Adherence counted the app's own prescribed rest days as sessions the
+  athlete failed to do** — rest exactly as instructed, get a worse number for
+  obeying the plan, in the dataset that is supposed to be the moat.
+
+  Also fixed: yesterday's check-in adjustment evaporating at midnight and
+  reappearing as a missed session; four date endpoints still validating
+  against server UTC after the client started sending local dates; a
+  triathlon "bail-out" that quoted only the run leg as a finish time; a
+  stalled cut still reading "On track" because the verdict used the athlete's
+  whole history; a check-in where re-answering ONE question silently rewrote
+  the other two to 3; an injury whose "your cut is paused" explanation never
+  reached the screen because the mutation invalidated the wrong query.
+
+  **One correction worth recording**: routing what-if through
+  `plannableConditions` was reported as closing a stale-condition leak. It
+  does not — the `arbitrate.ts` fix already closed that downstream. Writing
+  the regression test is what proved it: the test passed with the fix
+  reverted. What the change actually closes is the Phase 9 capability gate
+  (switching "Something hurts?" off stopped the week's engine but not
+  what-if's), and the test now pins that instead. A test that passes without
+  the fix documents nothing.
+
+  609 tests, `tsc` clean, production build green. Every fix required a
+  regression test verified to FAIL before the change — several agents
+  reported the exact pre-fix failure ("severity 1: 244 min against a healthy
+  185", "the infection changed nothing", "the ramp took nothing off: 365 vs
+  365"), and each pins the boundary on both sides so it cannot pass by
+  accident.
+
+  **Known remainder**: a genuinely restrictive injury left open for months
+  still produces full-length ramp stages — the honest fix needs a column
+  recording the span before `closeCondition` overwrites `updatedAt`, so it
+  wants its own migration.
+
 ## Client
 
 Everything above was API-only until the client was built — five routes under

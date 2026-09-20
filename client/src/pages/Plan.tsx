@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { api, daysUntil, todayStr, type PlanDay, type PlanSession, type PlanWeek } from "../lib/api";
+import { api, daysUntil, todayStr, GOAL_TYPE_LABELS, type PlanDay, type PlanSession, type PlanWeek } from "../lib/api";
 import { useAppShell, useSurfaceBlocks } from "../lib/appShell";
 import { CheckInStrip } from "../components/CheckInStrip";
 import { ConditionsPanel, type ConditionPrefill } from "../components/ConditionsPanel";
@@ -62,7 +62,14 @@ export default function Plan() {
   const { data: shell } = useAppShell();
   const planBlocks = useSurfaceBlocks("plan");
   const queryClient = useQueryClient();
-  const { data: goals } = useQuery({ queryKey: ["goals"], queryFn: api.goals });
+  /*
+   * `goals === undefined` is NOT `goals === []`, and conflating the two is
+   * one root cause with two symptoms. `main.tsx` sets `retry: 1`, so a
+   * `/api/goals` that 500s twice leaves this undefined for the rest of the
+   * page visit — and an athlete with two live goals was then told "No active
+   * goals yet" above a panel describing their multi-goal arbitrated week.
+   */
+  const { data: goals, error: goalsError } = useQuery({ queryKey: ["goals"], queryFn: api.goals });
   const { data: week, isLoading, error } = useQuery({ queryKey: ["week"], queryFn: () => api.week() });
   const { data: plan } = useQuery({ queryKey: ["plan"], queryFn: () => api.plan() });
 
@@ -80,6 +87,14 @@ export default function Plan() {
   const tick = useMutation({
     mutationFn: (body: Parameters<typeof api.completeSession>[0]) => api.completeSession(body),
     onSuccess: (record) => {
+      /*
+       * `["week"]` only, and checked rather than assumed: a completion feeds
+       * adherence and the layer's "already answered" immunity, both of which
+       * live in the week. Nothing in `arbitrateWeek` reads completions, so no
+       * goal conflict can move — which is why this one does NOT go through
+       * `invalidateEngineAnswer` (see lib/api.ts), while every condition and
+       * weigh-in mutation does.
+       */
       queryClient.invalidateQueries({ queryKey: ["week"] });
       if (!record.followUp) return;
       if (canOpenConditions) {
@@ -142,7 +157,9 @@ export default function Plan() {
       {isLoading && <div className="panel"><div className="skeleton" style={{ width: "60%" }} /></div>}
       {error && <div className="notice notice-danger">Couldn't load the week: {(error as Error).message}</div>}
 
-      {week && activeGoals.length === 0 && (
+      {goalsError && <div className="notice notice-danger">Couldn't load your goals: {(goalsError as Error).message}</div>}
+
+      {week && goals && activeGoals.length === 0 && (
         <div className="panel">
           <h2>No active goals yet</h2>
           <p className="small muted" style={{ marginTop: 0 }}>
@@ -221,7 +238,14 @@ export default function Plan() {
                 <div className="row" style={{ marginBottom: 6 }}>
                   <div className="stack">
                     <strong style={{ fontSize: 14 }}>{phase.goalLabel}</strong>
-                    <span className="tiny muted">{goal ? `${daysUntil(goal.targetDate)} days out · priority ${goal.priority}` : phase.goalType}</span>
+                    <span className="tiny muted">
+                      {/* DECISIONS C7: the fallback used to be `phase.goalType`
+                        * itself, so a goals query that failed while the week
+                        * was cached printed `body_composition` under the goal
+                        * name — an engine id, underscore and all, on the
+                        * screen the athlete reads every morning. */}
+                      {goal ? `${daysUntil(goal.targetDate)} days out · priority ${goal.priority}` : GOAL_TYPE_LABELS[phase.goalType]}
+                    </span>
                   </div>
                   <span className="display-num" style={{ fontSize: 15 }}>{phase.phaseName}</span>
                 </div>

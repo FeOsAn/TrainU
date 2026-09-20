@@ -11,7 +11,7 @@ import type { Sport, TrainingSession } from "@shared/session";
 import { computeTrainingLoad } from "@shared/trainingLoad";
 // Date helpers have one home (shared/dates.ts); the week itself is built in
 // weekService.ts, so this file no longer does any week arithmetic of its own.
-import { addDays, isValidISODate, todayISO } from "@shared/dates";
+import { addDays, isValidISODate, startOfWeek, todayISO } from "@shared/dates";
 import { findDuplicate } from "@shared/sessionDedupe";
 import { parseFitBufferSafely, fitResultToSession } from "./fitIngest";
 import { predictRunRace, predictTriathlon, TRIATHLON_DISTANCES, type TriathlonDistances } from "@shared/predictors/enduranceRace";
@@ -24,7 +24,7 @@ import { followUpFor, type CompletionReason, type CompletionStatus } from "@shar
 import { InvalidCompletionError, listCompletions, recordCompletion } from "./completionsService";
 import { createGoal, InvalidGoalError, listGoals } from "./goalsService";
 import { buildWeek, checkInSummaries } from "./weekService";
-import { CONDITION_HISTORY_DAYS, getAthleteParams } from "./athleteStateService";
+import { getAthleteParams, plannableConditions } from "./athleteStateService";
 import {
   ConditionNotFoundError,
   InvalidConditionError,
@@ -48,6 +48,7 @@ import {
   upsertPhysiqueEntry,
 } from "./physiqueService";
 import { pacingPlan, pacingDisciplineFor, type PacingBasis } from "@shared/pacing/pacing";
+import { isLiveGoal } from "@shared/appShell/assemble";
 import { runWhatIf, WhatIfPatchError } from "./whatIfService";
 import { assessGoalRisk, RISK_BAND_MULTIPLIER, type GoalRisk } from "@shared/conditions";
 import { isBenchmarkId } from "@shared/predictors/hyroxStations";
@@ -111,11 +112,6 @@ function logPrediction(kind: string, goalId: string | null, prediction: unknown)
   return id;
 }
 
-/** The conditions that can still bear on a plan — open, or inside a ramp. One window, used everywhere. */
-function openConditions(today: string) {
-  return listConditions({ closedOnOrAfter: addDays(today, -CONDITION_HISTORY_DAYS) });
-}
-
 /**
  * What an open injury or illness does to a prediction.
  *
@@ -129,7 +125,7 @@ function riskFor(goalId: string | undefined, today: string): { risk: GoalRisk | 
   if (!goalId) return { risk: null, multiplier: 1 };
   const goal = listGoals().find((g) => g.id === goalId);
   if (!goal) return { risk: null, multiplier: 1 };
-  const risk = assessGoalRisk(goal, openConditions(today), today, today);
+  const risk = assessGoalRisk(goal, plannableConditions(today), today, today);
   return { risk, multiplier: RISK_BAND_MULTIPLIER[risk.level] };
 }
 
@@ -177,6 +173,32 @@ function insertSession(s: TrainingSession): void {
       externalId: s.externalId ?? null,
     })
     .run();
+}
+
+/**
+ * The athlete's own calendar day, not the server's.
+ *
+ * Everything downstream keys off "today": which session the readiness slice
+ * may touch, whether a condition is open, whether a date the athlete typed is
+ * "in the future". The server runs in UTC, so an athlete far enough east is on
+ * tomorrow's date for the whole of their training morning — and every endpoint
+ * that validates a submitted date against `todayISO()` refuses them. An
+ * athlete in Auckland could not report an injury, mark one healed, log a
+ * weigh-in or record a station time between midnight and 1pm local, and was
+ * told they were dating it in the future while looking at today's date on
+ * their own phone.
+ *
+ * So the client sends its own day and the server believes it, but only within
+ * a day either side of UTC. That covers every real timezone (UTC-12 to UTC+14)
+ * while keeping the window small enough that a bad or stale value cannot make
+ * the app time-travel into a different training week. Exported so there is one
+ * such rule rather than one per endpoint.
+ */
+export function clientToday(req: { query: Record<string, unknown> }): string {
+  const utc = todayISO();
+  const claimed = typeof req.query.today === "string" ? req.query.today : undefined;
+  if (!claimed || !isValidISODate(claimed)) return utc;
+  return claimed >= addDays(utc, -1) && claimed <= addDays(utc, 1) ? claimed : utc;
 }
 
 export async function registerRoutes(_httpServer: Server, app: Express) {
@@ -248,16 +270,29 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
       (row as any)[key] = measured(value, "manually entered", now);
     }
 
+    /*
+     * Weight and body fat are weigh-ins, so they go where every weigh-in
+     * goes — and they now get the same typo confirmation the Physique panel
+     * has. `physiqueSaveWarning` was computed on `POST /api/physique` and
+     * nowhere else, so the identical value typed into the Athlete page's
+     * Weight field was stored in silence: `weightKg` bounds are [35, 200], a
+     * fat-fingered 82 for 72 passes them, and Katch-McArdle then moves every
+     * day's target by ~300 kcal and resizes a cut. Same value, same table, two
+     * levels of protection depending on which screen it was typed into.
+     */
+    let warning: string | null = null;
     if (Object.keys(physique).length > 0) {
+      const date = clientToday(req);
       try {
-        upsertPhysiqueEntry({ date: todayISO(), ...physique });
+        warning = physiqueSaveWarning({ date, ...physique });
+        upsertPhysiqueEntry({ date, ...physique }, { today: date });
       } catch (e) {
         if (e instanceof InvalidPhysiqueEntryError) return res.status(400).json({ error: e.message });
         throw e;
       }
     }
     saveAthleteRow(row);
-    res.json(getAthleteParams());
+    res.json({ ...getAthleteParams(), ...(warning ? { warning } : {}) });
   });
 
   /*
@@ -265,8 +300,10 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
    * Declared `planned` through Phase 8 because nothing entered them — the
    * predictor could read them and no screen could write them.
    */
-  app.get("/api/athlete/benchmarks", (_req, res) => {
-    res.json(getBenchmarks());
+  app.get("/api/athlete/benchmarks", (req, res) => {
+    // `today` matters on a read here: it is what decides whether a stored
+    // effort still reads as current or asks for a retest.
+    res.json(getBenchmarks({ today: clientToday(req) }));
   });
 
   app.patch("/api/athlete/benchmarks", (req, res) => {
@@ -275,7 +312,7 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
       return res.status(400).json({ error: "body must be an object of benchmark -> seconds, {seconds,date,note}, or null to clear it" });
     }
     try {
-      res.json(patchBenchmarks(body as BenchmarkPatch));
+      res.json(patchBenchmarks(body as BenchmarkPatch, { today: clientToday(req) }));
     } catch (e) {
       if (e instanceof InvalidBenchmarkError) return res.status(400).json({ error: e.message });
       throw e;
@@ -389,9 +426,26 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
 
   // ─── Goal arbitration (Phase 3) ─────────────────────────────────────────
   app.get("/api/plan/arbitrate", (req, res) => {
-    const today = todayISO();
-    const from = typeof req.query.from === "string" ? req.query.from : today;
-    if (!isValidISODate(from)) return res.status(400).json({ error: "from must be YYYY-MM-DD" });
+    const today = clientToday(req);
+    const requestedFrom = typeof req.query.from === "string" ? req.query.from : today;
+    if (!isValidISODate(requestedFrom)) return res.status(400).json({ error: "from must be YYYY-MM-DD" });
+    /*
+     * Monday-anchored, like every other week in the app.
+     *
+     * `arbitratePlan` steps in 7-day increments from whatever it is given, so
+     * a Thursday `from` produced a Thursday grid: the Plan page then showed
+     * Monday-anchored day cards from `/api/plan/week` and, a few hundred
+     * pixels below, a conflict card dated Thursday-to-Thursday spanning two
+     * of them — dates matching no week on the screen, and a taper boundary a
+     * week away from the one the week route reported. `whatIfService` already
+     * normalises at its own call site with the comment "weeks must line up
+     * with /api/plan/week or 'the week of the 7th' means two different weeks
+     * on two screens"; this route was the one place still missing it.
+     *
+     * Normalised AFTER validation so garbage still 400s, and before `to` is
+     * derived, since that default seeds from `from`.
+     */
+    const from = startOfWeek(requestedFrom);
     const activeGoals = listGoals().filter((g) => g.active);
     const defaultTo = activeGoals.length
       ? activeGoals.reduce((latest, g) => (g.targetDate > latest ? g.targetDate : latest), from)
@@ -403,7 +457,7 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
     }
     // Same condition list and same `today` the week route uses, so a cut
     // paused by an open injury reads the same on both screens.
-    const plan = arbitratePlan(activeGoals, from, to, getAthleteParams(), openConditions(today), today);
+    const plan = arbitratePlan(activeGoals, from, to, getAthleteParams(), plannableConditions(today), today);
     logPrediction("plan:arbitration", null, plan);
     res.json(plan);
   });
@@ -460,28 +514,6 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
    * to answer "what did that change?" and the only honest answer is the one
    * the week itself produces, so both go through one builder.
    */
-  /*
-   * The athlete's own calendar day, not the server's.
-   *
-   * Everything downstream keys off "today": which session the readiness slice
-   * may touch, whether a condition is open, which day card is highlighted. The
-   * server runs in UTC, so an athlete far enough east checking in at 07:00
-   * local is still on yesterday's UTC date — and their morning check-in would
-   * silently do nothing, which is the worst kind of failure: the app says it
-   * recorded something and the plan does not move.
-   *
-   * So the client sends its own date and the server believes it, but only
-   * within a day either side of UTC. That covers every real timezone (UTC-12
-   * to UTC+14) while keeping the window small enough that a bad or stale value
-   * cannot make the app time-travel into a different training week.
-   */
-  function clientToday(req: { query: Record<string, unknown> }): string {
-    const utc = todayISO();
-    const claimed = typeof req.query.today === "string" ? req.query.today : undefined;
-    if (!claimed || !isValidISODate(claimed)) return utc;
-    return claimed >= addDays(utc, -1) && claimed <= addDays(utc, 1) ? claimed : utc;
-  }
-
   app.get("/api/plan/week", (req, res) => {
     const today = clientToday(req);
     const requested = typeof req.query.date === "string" ? req.query.date : today;
@@ -543,17 +575,30 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
   });
 
   // ─── Injuries & illness (Phase 10) ──────────────────────────────────────
-  // Closed conditions are returned too, and deliberately: the return-to-
-  // training ramp reads `closedAt`, so a condition that healed last week is
-  // still steering this week's ceiling. Anything healed longer ago than the
-  // longest possible ramp cannot be, so it is not loaded.
+  /*
+   * The athlete's whole history, healed or not — which is NOT the engine's
+   * window.
+   *
+   * This used to apply `CONDITION_HISTORY_DAYS`, a 60-day bound whose entire
+   * justification is engine-scoped: nothing healed longer ago can still be
+   * inside a return-to-training ramp. Correct for a plan, wrong for a record.
+   * The Athlete page's "Injuries & illness" panel is this endpoint's only
+   * reader, and a hamstring strain that healed in April simply vanished from
+   * it — with no count and no "older entries hidden", so an athlete with
+   * nothing recent read "Nothing logged", an affirmatively false statement
+   * about their own history. A recurrence could not be reopened either, only
+   * logged again as a new, unlinked condition.
+   *
+   * One window, two purposes, two different correct answers. The engine keeps
+   * its window in `plannableConditions`; the record is the record.
+   */
   app.get("/api/conditions", (_req, res) => {
-    res.json(listConditions({ closedOnOrAfter: addDays(todayISO(), -CONDITION_HISTORY_DAYS) }));
+    res.json(listConditions());
   });
 
   app.post("/api/conditions", (req, res) => {
     try {
-      res.status(201).json(openCondition(req.body ?? {}, { today: todayISO() }));
+      res.status(201).json(openCondition(req.body ?? {}, { today: clientToday(req) }));
     } catch (e) {
       if (e instanceof InvalidConditionError) return res.status(400).json({ error: e.message });
       throw e;
@@ -562,7 +607,7 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
 
   app.patch("/api/conditions/:id", (req, res) => {
     try {
-      res.json(patchCondition(req.params.id, req.body ?? {}));
+      res.json(patchCondition(req.params.id, req.body ?? {}, clientToday(req)));
     } catch (e) {
       if (e instanceof ConditionNotFoundError) return res.status(404).json({ error: "no such injury or illness on record" });
       if (e instanceof InvalidConditionError) return res.status(400).json({ error: e.message });
@@ -578,11 +623,12 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
   app.post("/api/conditions/:id/close", (req, res) => {
     const body = (req.body ?? {}) as { closedAt?: string | null };
     try {
-      if (body.closedAt === null) return res.json(reopenCondition(req.params.id));
+      const today = clientToday(req);
+      if (body.closedAt === null) return res.json(reopenCondition(req.params.id, today));
       if (body.closedAt !== undefined && typeof body.closedAt !== "string") {
         return res.status(400).json({ error: "closedAt must be a date in YYYY-MM-DD form, or null to reopen it" });
       }
-      res.json(closeCondition(req.params.id, body.closedAt));
+      res.json(closeCondition(req.params.id, body.closedAt, today));
     } catch (e) {
       if (e instanceof ConditionNotFoundError) return res.status(404).json({ error: "no such injury or illness on record" });
       if (e instanceof InvalidConditionError) return res.status(400).json({ error: e.message });
@@ -627,7 +673,10 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
       });
       // Only this morning's check-in can change a week; an edited check-in
       // from last Tuesday is a record, not an instruction.
-      const adjustments = checkIn.date === today ? checkInSummaries(buildWeek({ today }).adjustments) : [];
+      // Scoped to today: the week replays every morning it contains, so an
+      // unbounded read would answer "what did THIS check-in change?" with
+      // Tuesday's rest day as well.
+      const adjustments = checkIn.date === today ? checkInSummaries(buildWeek({ today }).adjustments, today) : [];
       res.json({ checkIn: getCheckIn(checkIn.date) ?? checkIn, readiness, adjustments });
     } catch (e) {
       if (e instanceof InvalidCheckInError) return res.status(400).json({ error: e.message });
@@ -673,7 +722,7 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
       // validator inside the write is the one that should do the talking.
       const input = body as PhysiqueEntryInput;
       const warning = isValidISODate(input.date) ? physiqueSaveWarning(input) : null;
-      res.status(201).json({ entry: upsertPhysiqueEntry(input), warning });
+      res.status(201).json({ entry: upsertPhysiqueEntry(input, { today: clientToday(req) }), warning });
     } catch (e) {
       if (e instanceof InvalidPhysiqueEntryError) return res.status(400).json({ error: e.message });
       throw e;
@@ -711,9 +760,20 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
    * `targetSecondsOverride` is the "what if I went for 3:15" control. It is
    * ephemeral by construction — it never reaches the goal.
    */
-  app.get("/api/pacing", (_req, res) => {
-    const today = todayISO();
-    const goals = listGoals().filter((g) => g.active && pacingDisciplineFor(g) !== null);
+  app.get("/api/pacing", (req, res) => {
+    const today = clientToday(req);
+    /*
+     * `isLiveGoal`, not a hand-rolled `g.active`: nothing in this app can set
+     * a goal inactive, so a race stays active forever and this route kept
+     * serving a full pacing plan — splits, finish band and all — for a
+     * marathon run in May, sitting above the plan for the race the athlete is
+     * actually training for with nothing to tell them apart. Arbitration has
+     * filtered `phaseName !== "past"` since Phase 3 and `assessGoalRisk` says
+     * in its own doc that it is never called for a past goal; pacing simply
+     * never got the rule. The helper's boundary is `targetDate >= today`, not
+     * `>`: race day itself is the one day the plan is most needed.
+     */
+    const goals = listGoals().filter((g) => isLiveGoal(g, today) && pacingDisciplineFor(g) !== null);
     res.json(goals.map((g) => pacingPlan(g, getAthleteParams(), getCalibrationMultiplier(), { today })));
   });
 

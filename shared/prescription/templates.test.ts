@@ -11,9 +11,11 @@ import {
   applyCeiling,
   clampKind,
   downgradeToEasy,
-  equivalentMinutes,
   rpeFor,
 } from "./templates";
+import * as templates from "./templates";
+import { DEFAULT_ATHLETE } from "../athlete";
+import { estimateSessionTss } from "../trainingLoad";
 
 test("downgradeToEasy reaches a fixed point for every session kind", () => {
   for (const kind of SESSION_KINDS) {
@@ -75,35 +77,52 @@ test("clampKind keeps every kind inside its own plausible range", () => {
   }
 });
 
-test("substituting across sports preserves LOAD, not minutes", () => {
-  // SPORT_FALLBACK_PER_MIN: run 0.85, bike 0.70, swim 0.50. An hour of
-  // running is ~73 minutes of riding, not 60 — swapping minute-for-minute
-  // would quietly delete 18% of the week's stress and call it a substitution.
-  assert.ok(Math.abs(SPORT_EQUIVALENCE.run.bike - 0.85 / 0.7) < 0.01);
-  assert.ok(SPORT_EQUIVALENCE.run.bike > 1, "a ride must be LONGER than the run it replaces");
+/*
+ * ─── The two exchange rates that disagreed ────────────────────────────────
+ *
+ * `SPORT_EQUIVALENCE` is derived from `SPORT_FALLBACK_PER_MIN`, which prices
+ * a LOGGED session that arrived with nothing but a duration. A PLANNED
+ * session is priced by `rpeTss`, which is sport-blind. Those are two
+ * different answers to "what does a minute of this cost", and sizing a
+ * substitute with the first one multiplied a week denominated in the second.
+ * These tests exist so the next person reads the disagreement rather than
+ * re-deriving the bug from the doc comment.
+ */
+
+test("a PLANNED session is priced sport-blind, which is why SPORT_EQUIVALENCE must not size one", () => {
+  const minutes = 60;
+  const asRun = estimateSessionTss({ sport: "run", durationMinutes: minutes, rpe: 4 }, DEFAULT_ATHLETE);
+  const asBike = estimateSessionTss({ sport: "bike", durationMinutes: minutes, rpe: 4 }, DEFAULT_ATHLETE);
+  const asSwim = estimateSessionTss({ sport: "swim", durationMinutes: minutes, rpe: 4 }, DEFAULT_ATHLETE);
+  assert.equal(asBike, asRun, "the prescriber's pricer does not know a ride from a run");
+  assert.equal(asSwim, asRun);
+
+  // And the energy table says they differ by 21% and 70%. Both statements are
+  // true of their own domain; only one of them is the currency a prescribed
+  // week is counted in.
+  assert.ok(SPORT_EQUIVALENCE.run.bike > 1.2, "the energy table says a ride must be LONGER");
   assert.ok(SPORT_EQUIVALENCE.run.swim > SPORT_EQUIVALENCE.run.bike, "and a swim longer still");
+
+  // So converting minutes up by the energy rate and then pricing the result
+  // with the planned pricer INFLATES the session — which is exactly what an
+  // injured athlete's week did.
+  const inflated = Math.round(minutes * SPORT_EQUIVALENCE.run.bike);
+  assert.ok(
+    estimateSessionTss({ sport: "bike", durationMinutes: inflated, rpe: 4 }, DEFAULT_ATHLETE) > asRun,
+    "a substitute sized by the energy table costs MORE than the session it replaces",
+  );
+});
+
+test("the table is still internally honest about what it does say", () => {
   for (const sport of Object.keys(SPORT_EQUIVALENCE) as Array<keyof typeof SPORT_EQUIVALENCE>) {
     assert.equal(SPORT_EQUIVALENCE[sport][sport], 1, `${sport} → ${sport} must be a no-op`);
   }
 });
 
-test("an equivalent session is still a plausible session of its own kind", () => {
-  const ride = equivalentMinutes("run_long", "bike_endurance", 120);
-  assert.ok(ride > 120, "a ride replacing a two-hour long run is longer than two hours");
-  assert.ok(ride <= KIND_MINUTES.bike_endurance.max);
-
-  for (const from of SESSION_KINDS) {
-    for (const to of SESSION_KINDS) {
-      if (to === "rest") continue;
-      for (const minutes of [0, 30, 90, 300]) {
-        const out = equivalentMinutes(from, to, minutes);
-        assert.ok(
-          out >= KIND_MINUTES[to].min && out <= KIND_MINUTES[to].max,
-          `${from} ${minutes}min → ${to} came out at ${out}`,
-        );
-      }
-    }
-  }
+test("equivalentMinutes is gone — no one gets to size a substitute across sports again", () => {
+  // It had exactly two callers, both in the conditions slice, and both were
+  // the defect. Leaving it exported is leaving the trap baited.
+  assert.ok(!("equivalentMinutes" in templates), "equivalentMinutes is back");
 });
 
 test("every session kind has a sport, and every sport has an exchange rate", () => {

@@ -19,6 +19,7 @@ import {
   formatBenchmarkSeconds,
   parseBenchmarkInput,
 } from "@shared/predictors/hyroxStations";
+import { addDays } from "@shared/dates";
 import { InvalidBenchmarkError, getBenchmarks, patchBenchmarks } from "./benchmarksService";
 
 const TODAY = "2026-09-18";
@@ -185,4 +186,38 @@ test("the athlete can type 1:45 or 105 and mean the same thing", () => {
   assert.equal(parseBenchmarkInput("1:75"), null, "a minute has sixty seconds in it");
   assert.equal(formatBenchmarkSeconds(105), "1:45");
   assert.equal(formatBenchmarkSeconds(DEFAULT_ATHLETE.benchmarks.row?.value ?? 200), "3:20");
+});
+
+/*
+ * ─── Regressions ──────────────────────────────────────────────────────────
+ */
+
+test("DEFECT: a station time ages — the retest window is read on every READ, not frozen at entry", () => {
+  resetAthlete();
+  const entered = "2026-01-14";
+  patchBenchmarks({ sled_push: { seconds: 208, note: "Race sled" } }, { today: entered });
+
+  /*
+   * The existing coverage reaches the stale branch only by back-dating an
+   * entry AS IT IS TYPED, which is the one case the write-time call can
+   * still catch. Elapsed time was untested and unreachable: the provenance
+   * string was computed with `today` = the day of entry and stored, so a
+   * January effort read "measured, 14 Jan" in September with no prompt to
+   * retest, after a whole training block. Both sides of the 84-day line.
+   */
+  const day84 = getBenchmarks({ today: addDays(entered, 84) }).find((v) => v.id === "sled_push")!;
+  assert.doesNotMatch(day84.value.source, /retest/, "84 days is still inside the window");
+  assert.match(day84.value.source, /^Race sled — measured, 14 Jan/);
+
+  const day85 = getBenchmarks({ today: addDays(entered, 85) }).find((v) => v.id === "sled_push")!;
+  assert.match(day85.value.source, /older than 84 days — retest/, "the day after, it says so");
+  assert.match(day85.value.source, /^Race sled — /, "and the athlete's own note survives the re-derive");
+
+  // Deliberately NOT a confidence change: an old measurement still beats a
+  // guess, so `verified` and the value itself are untouched and no
+  // prediction band moves. This is about what the athlete is told.
+  assert.equal(day85.value.verified, true);
+  assert.equal(day85.value.value, 208);
+  assert.equal(day85.value.asOf, entered);
+  assert.equal(day85.display, day84.display);
 });

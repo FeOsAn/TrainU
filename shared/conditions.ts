@@ -457,7 +457,48 @@ export const RAMP_BY_SEVERITY: Record<Severity, RampProfile> = {
 export const RAMP_STAGE_SHARE = 0.4;
 export const RAMP_MAX_STAGE_DAYS = 21;
 
-/** The days this condition was open, end to end — the input the ramp length is derived from. */
+/**
+ * Did this condition actually take training away while it was open?
+ *
+ * The ramp is a claim about DETRAINING — "you have been off, so come back
+ * gradually". A condition that removed nothing left nothing to come back
+ * from. `validRestrictions` accepts an explicit "this rules nothing out",
+ * and the form sends exactly that whenever the athlete ticks no boxes, so a
+ * restriction-free record is the DEFAULT shape of a logged niggle rather
+ * than an edge case. Without this gate, an athlete who logged an Achilles
+ * niggle in January, ticked no boxes, trained every session all year and
+ * then tidily marked it healed in September was handed six weeks of
+ * easy-only training as a reward for being honest about closing the record.
+ *
+ * Derived from `forbiddenKinds` rather than from `restrictions.length`, so a
+ * restriction that happens to rule out no session kind is treated as what it
+ * is — one table, the same one the week adjuster acts on, never a second
+ * opinion about what a restriction does.
+ *
+ * An ILLNESS always counts: `ILLNESS_RULES` act on severity and never
+ * consult restrictions, so an illness with no boxes ticked still shortened
+ * and capped every session it was open for.
+ */
+export function steersTraining(c: Condition): boolean {
+  return c.kind === "illness" || forbiddenKinds(c.restrictions).size > 0;
+}
+
+/**
+ * The days this condition was open, end to end — the input the ramp length
+ * is derived from.
+ *
+ * KNOWN LIMITATION, stated rather than discovered later: this is the
+ * record's calendar lifespan, not the days training was actually reduced. A
+ * condition that went stale is SUSPENDED (`isSuspended`) and steers nothing
+ * from then on, yet those days still count here — and they cannot be
+ * subtracted retroactively, because closing a condition overwrites the
+ * `updatedAt` that says when it was last touched. Fixing that honestly means
+ * freezing the effective span at close time in a stored column, which is a
+ * migration. `steersTraining` closes the loud half of the problem (a record
+ * that removed nothing earns no ramp at all); the quiet half — a genuinely
+ * restrictive injury forgotten for months — is still bounded only by
+ * `RAMP_MAX_STAGE_DAYS`.
+ */
 export function daysOff(c: Condition): number {
   return c.closedAt === null ? 0 : daysBetween(c.openedAt, c.closedAt) + 1;
 }
@@ -467,8 +508,13 @@ function rampStageDays(c: Condition): number {
   return Math.min(RAMP_MAX_STAGE_DAYS, Math.max(1, Math.round(raw)));
 }
 
-/** The two stages this condition's return is made of, lengths already derived from its time off. */
+/**
+ * The two stages this condition's return is made of, lengths already derived
+ * from its time off — or NO stages at all when it never took a session away
+ * (see `steersTraining`).
+ */
 export function rampStagesFor(c: Condition): RampStage[] {
+  if (!steersTraining(c)) return [];
   const profile = RAMP_BY_SEVERITY[c.severity];
   const days = rampStageDays(c);
   return [
@@ -506,6 +552,9 @@ export function rampStageOn(c: Condition, date: string): RampPosition | null {
   if (dayOffset < 1) return null;
 
   const stages = rampStagesFor(c);
+  // No stages means this condition removed no training, so there is nothing
+  // to ramp back from — an empty return, not a zero-length one.
+  if (stages.length < 2) return null;
   const thresholdFrom = addDays(c.closedAt, stages[0]!.days + 1);
   const fullFrom = addDays(c.closedAt, stages[0]!.days + stages[1]!.days + 1);
 
