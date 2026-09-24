@@ -19,6 +19,12 @@ import { type Measured, seeded, valueOf } from "./measured";
 export const FRESH_KM_TO_THRESHOLD = 1.17;
 /** VO2 intervals are run at about the fresh kilometre itself. */
 export const FRESH_KM_TO_INTERVAL = 1.02;
+/** Riegel's exponent for scaling PACE with distance. calibration.ts projects evidence with it; the two conversions below are it, evaluated. */
+export const RIEGEL_PACE_EXPONENT = 0.06;
+/** Easy running sits about a third slower than the fresh kilometre. */
+export const FRESH_KM_TO_EASY = 1.36;
+/** 1 km → 5 km, by Riegel. */
+export const FRESH_KM_TO_5K = Math.pow(5, RIEGEL_PACE_EXPONENT);
 
 export interface AthleteParams {
   ftpWatts: Measured<number>;
@@ -60,8 +66,8 @@ export const DEFAULT_ATHLETE: AthleteParams = {
   bikeCdA: seeded(0.32, "seed — relaxed road position assumed, not measured"),
   cssSecPer100m: seeded(112),
   runThresholdSecPerKm: seeded(260),
-  runEasySecPerKm: seeded(354, "seed — derived from threshold"),
-  run5kSecPerKm: seeded(280, "seed — derived from threshold"),
+  runEasySecPerKm: seeded(354, "seed — derived from the kilometre"),
+  run5kSecPerKm: seeded(280, "seed — derived from the kilometre"),
   lthrBpm: seeded(175),
   maxHrBpm: seeded(185, "seed — assumed, only used for %maxHR fallbacks"),
   weightKg: seeded(75),
@@ -109,10 +115,48 @@ export type AthleteRow = Partial<Record<Exclude<keyof AthleteParams, "benchmarks
   benchmarks?: Record<string, Measured<number>>;
 };
 
+/**
+ * Easy pace and 5 km pace, re-derived from a MEASURED fresh kilometre.
+ *
+ * Both are functions of the kilometre, and calibration.ts derives them that
+ * way whenever it recomputes the set from logged evidence. But a kilometre
+ * entered directly — from the onboarding survey, or by editing the field on
+ * the Athlete page — only wrote that one field, leaving two stale seeds
+ * derived from a threshold the athlete no longer has.
+ *
+ * That was not cosmetic. `prescribe.ts` prints threshold and interval paces
+ * off the kilometre and easy pace off `runEasySecPerKm`, so one session card
+ * mixed a real number with a seed implying a different athlete: someone who
+ * told the survey they run 19:30 for 5 km was given 3:32/km reps and a
+ * 5:54/km easy run, which is not the same person's easy pace.
+ *
+ * Applied at READ time, and only over values that are still seeds — a real
+ * measured easy pace from logged runs always wins. The result stays
+ * `verified: false`, because derived is not measured and every confidence
+ * band downstream must keep saying so.
+ */
+export function withDerivedRunningPaces(params: AthleteParams): AthleteParams {
+  const km = params.runThresholdSecPerKm;
+  if (!km.verified) return params;
+
+  const derive = (current: Measured<number>, factor: number, field: string): Measured<number> => {
+    if (current.verified) return current;
+    const value = Math.round(km.value * factor);
+    if (!withinBounds(field, value)) return current;
+    return { value, verified: false, source: "derived from your measured kilometre", ...(km.asOf ? { asOf: km.asOf } : {}) };
+  };
+
+  return {
+    ...params,
+    runEasySecPerKm: derive(params.runEasySecPerKm, FRESH_KM_TO_EASY, "runEasySecPerKm"),
+    run5kSecPerKm: derive(params.run5kSecPerKm, FRESH_KM_TO_5K, "run5kSecPerKm"),
+  };
+}
+
 /** Merge a (possibly partial) stored row over the defaults. Never trusts an out-of-bounds stored value. */
 export function athleteParamsFromRow(row?: AthleteRow | null): AthleteParams {
   const merged = { ...DEFAULT_ATHLETE } as AthleteParams;
-  if (!row) return merged;
+  if (!row) return withDerivedRunningPaces(merged);
   for (const key of Object.keys(DEFAULT_ATHLETE) as (keyof AthleteParams)[]) {
     if (key === "benchmarks") continue;
     const stored = row[key];
@@ -121,7 +165,7 @@ export function athleteParamsFromRow(row?: AthleteRow | null): AthleteParams {
     }
   }
   merged.benchmarks = { ...(row.benchmarks ?? {}) };
-  return merged;
+  return withDerivedRunningPaces(merged);
 }
 
 /** Flatten to plain numbers for math that doesn't care about provenance (TSS, physics). */

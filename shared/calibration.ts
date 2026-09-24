@@ -18,6 +18,7 @@
  */
 
 import { type Measured, measured, seeded } from "./measured";
+import { FRESH_KM_TO_5K, FRESH_KM_TO_EASY, RIEGEL_PACE_EXPONENT } from "./athlete";
 
 export interface RunEvidence {
   date: string;
@@ -45,7 +46,21 @@ export interface CalibratedRunning {
   maxHrBpm: Measured<number>;
 }
 
-const RIEGEL = 0.06;
+const RIEGEL = RIEGEL_PACE_EXPONENT;
+
+/**
+ * Pace at 1 km implied by a hard effort over `distanceKm`, via Riegel.
+ *
+ * This is the number `AthleteParams.runThresholdSecPerKm` holds — an all-out
+ * kilometre, NOT threshold pace (see that field's doc comment). Exported
+ * because onboarding asks the athlete for a recent race on day one and has to
+ * land it in the same units, through the same projection, as a run this app
+ * later ingests from Garmin. Two modules projecting their own Riegel is how
+ * the same athlete ends up with two different fresh kilometres.
+ */
+export function freshKmPaceFrom(distanceKm: number, secPerKm: number): number {
+  return secPerKm * Math.pow(distanceKm, -RIEGEL);
+}
 const FRESH_WINDOW_DAYS = 56;
 const EASY_WINDOW_DAYS = 42;
 const FIVE_K_WINDOW_DAYS = 84;
@@ -139,7 +154,7 @@ export function calibrateRunning(
     if (!pace || !r.distanceKm || r.distanceKm < 1 || r.distanceKm > 15) continue;
     if (!isHard(r, lthrBpm.value)) continue;
     candidates.push({
-      secPerKm: pace * Math.pow(r.distanceKm, -RIEGEL),
+      secPerKm: freshKmPaceFrom(r.distanceKm, pace),
       date: r.date,
       note: `${Math.round(r.distanceKm * 10) / 10} km at ${fmtPace(pace)} on ${niceDate(r.date)}, projected to 1 km`,
     });
@@ -166,13 +181,13 @@ export function calibrateRunning(
     const rpe = rpeOf(r);
     return rpe != null && rpe <= 4;
   });
-  let runEasySecPerKm: Measured<number> = measured(Math.round(runThresholdSecPerKm.value * 1.36), "derived from the kilometre");
+  let runEasySecPerKm: Measured<number> = measured(Math.round(runThresholdSecPerKm.value * FRESH_KM_TO_EASY), "derived from the kilometre");
   if (easyRuns.length >= 2) {
     runEasySecPerKm = measured(Math.round(median(easyRuns.map((r) => paceOf(r)!))), `median of ${easyRuns.length} easy runs in the last six weeks`);
   }
 
   // ── 5 km pace ──────────────────────────────────────────────────────────
-  let run5kSecPerKm: Measured<number> = measured(Math.round(runThresholdSecPerKm.value * Math.pow(5, RIEGEL)), "derived from the kilometre");
+  let run5kSecPerKm: Measured<number> = measured(Math.round(runThresholdSecPerKm.value * FRESH_KM_TO_5K), "derived from the kilometre");
   const fiveK = tests
     .filter((t) => t.testId === "run_5k_tt" && t.value > 0 && ageDays(t.date) <= FIVE_K_WINDOW_DAYS)
     .sort((a, b) => b.date.localeCompare(a.date))[0];

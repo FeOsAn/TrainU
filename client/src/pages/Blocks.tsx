@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type BlockChoiceRow } from "../lib/api";
+import DeleteApp from "../components/DeleteApp";
 
 /**
  * What's in your app, and your say over it.
@@ -46,7 +47,7 @@ export default function Blocks() {
     <div className="page">
       <div className="page-header">
         <div className="kicker">Your app</div>
-        <h1>What's in it, and what isn't</h1>
+        <h1 className="display">What's in it, and what isn't</h1>
       </div>
 
       <div className="notice notice-neutral">
@@ -64,52 +65,49 @@ export default function Blocks() {
             {SURFACE_TITLES[surface] ?? surface}
           </div>
           {rows.map((row) => (
-            <div key={row.id} className="surface-2" style={{ marginBottom: 8 }}>
+            <div key={row.id} className="surface-2 block-row">
               <div className="row">
-                <div className="stack" style={{ minWidth: 0 }}>
+                <div className="stack" style={{ minWidth: 0, gap: 3 }}>
                   <strong>{row.title}</strong>
-                  <span className="tiny muted" style={{ marginTop: 3 }}>
+                  <span className="tiny muted">
                     {choiceLabel(row)}
                     {row.overridden ? " · your choice, not your goals'" : ""}
                   </span>
                 </div>
-                <div style={{ flexShrink: 0, display: "flex", gap: 6 }}>
-                  {row.status === "planned" && <span className="pill pill-seed">not built</span>}
-                  <button
-                    className="btn-ghost"
-                    style={{ padding: "4px 9px", fontSize: 11 }}
-                    disabled={patch.isPending || row.choice === "on"}
-                    onClick={() => patch.mutate({ [row.id]: "on" })}
-                  >
-                    On
-                  </button>
-                  <button
-                    className="btn-ghost"
-                    style={{ padding: "4px 9px", fontSize: 11 }}
-                    disabled={patch.isPending || row.choice === "off"}
-                    onClick={() => patch.mutate({ [row.id]: "off" })}
-                  >
-                    Off
-                  </button>
-                  <button
-                    className="btn-ghost"
-                    style={{ padding: "4px 9px", fontSize: 11 }}
-                    disabled={patch.isPending || row.choice === null}
-                    onClick={() => patch.mutate({ [row.id]: null })}
-                  >
-                    Let my goals decide
-                  </button>
-                </div>
+                {row.status === "planned" && <span className="pill pill-seed">not built</span>}
               </div>
+
               {row.note && (
-                <div className="tiny muted" style={{ marginTop: 6, lineHeight: 1.45 }}>
+                <div className="tiny muted" style={{ marginTop: 8, lineHeight: 1.5 }}>
                   {row.note}
                 </div>
               )}
+
+              {/* Their own row, and chips rather than buttons: three controls and a
+                  title do not fit on one line at phone width, and "Let my goals
+                  decide" is the longest and the most important to keep readable. */}
+              <div className="chip-row" style={{ marginTop: 10 }}>
+                {([
+                  ["on", "On"],
+                  ["off", "Off"],
+                  [null, "Let my goals decide"],
+                ] as const).map(([choice, label]) => (
+                  <button
+                    key={label}
+                    className={`chip chip-mini${row.choice === choice ? " chip-on" : ""}`}
+                    disabled={patch.isPending || row.choice === choice}
+                    onClick={() => patch.mutate({ [row.id]: choice })}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
             </div>
           ))}
         </div>
       ))}
+
+      <DeleteApp />
     </div>
   );
 }

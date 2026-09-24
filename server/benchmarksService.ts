@@ -32,6 +32,7 @@ import { eq } from "drizzle-orm";
 import { db } from "./db";
 import { athleteMeasurements } from "@shared/schema";
 import { type AthleteRow, athleteParamsFromRow } from "@shared/athlete";
+import { getAthleteRow, saveAthleteRow } from "./athleteRowStore";
 import { calibrateBenchmark } from "@shared/calibration";
 import { isValidISODate, todayISO } from "@shared/dates";
 import type { Measured } from "@shared/measured";
@@ -51,7 +52,6 @@ import {
 } from "@shared/predictors/hyroxStations";
 
 /** Single-athlete app: the same row every other athlete read and write uses. */
-const ATHLETE_ROW_ID = "self";
 
 /**
  * How long a timed effort stands before it is flagged for a retest. Matches
@@ -90,22 +90,6 @@ export interface BenchmarkEntry {
 
 /** `null` clears a benchmark back to its seed — the only way to undo a typo that landed inside bounds. */
 export type BenchmarkPatch = Record<string, number | BenchmarkEntry | null>;
-
-function getAthleteRow(): AthleteRow | null {
-  const row = db.select().from(athleteMeasurements).where(eq(athleteMeasurements.id, ATHLETE_ROW_ID)).get();
-  return row ? (JSON.parse(row.fieldsJson) as AthleteRow) : null;
-}
-
-function saveAthleteRow(row: AthleteRow): void {
-  const fieldsJson = JSON.stringify(row);
-  const now = new Date().toISOString();
-  const existing = db.select().from(athleteMeasurements).where(eq(athleteMeasurements.id, ATHLETE_ROW_ID)).get();
-  if (existing) {
-    db.update(athleteMeasurements).set({ fieldsJson, updatedAt: now }).where(eq(athleteMeasurements.id, ATHLETE_ROW_ID)).run();
-  } else {
-    db.insert(athleteMeasurements).values({ id: ATHLETE_ROW_ID, fieldsJson, updatedAt: now }).run();
-  }
-}
 
 /**
  * The stored effort, aged against TODAY rather than against the day it was

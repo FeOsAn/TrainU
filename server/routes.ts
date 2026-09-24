@@ -25,6 +25,7 @@ import { InvalidCompletionError, listCompletions, recordCompletion } from "./com
 import { createGoal, InvalidGoalError, listGoals } from "./goalsService";
 import { buildWeek, checkInSummaries } from "./weekService";
 import { getAthleteParams, plannableConditions } from "./athleteStateService";
+import { getAthleteRow, saveAthleteRow } from "./athleteRowStore";
 import {
   ConditionNotFoundError,
   InvalidConditionError,
@@ -53,6 +54,15 @@ import { runWhatIf, WhatIfPatchError } from "./whatIfService";
 import { assessGoalRisk, RISK_BAND_MULTIPLIER, type GoalRisk } from "@shared/conditions";
 import { isBenchmarkId } from "@shared/predictors/hyroxStations";
 import { chatOnboarding } from "./onboarding";
+import {
+  InvalidSurveyError,
+  SurveyAlreadyCompleteError,
+  completeSurvey,
+  getBuildState,
+  preferredTrainingDays,
+  resetApp,
+} from "./surveyService";
+import { interpretNarrative } from "./surveyInterpret";
 import { getPreferences, updateBlockPreferences, updateConnectorPreferences, updateFeaturePreferences } from "./preferencesService";
 import { connectGarmin, syncGarmin } from "./connectors/garmin";
 import { exchangeWhoopCode, getWhoopAuthorizationUrl, syncWhoop } from "./connectors/whoop";
@@ -63,37 +73,23 @@ import { getCalibrationMultiplier, getCalibrationReport, OutcomeNotFoundError, r
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 const uploadLarge = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
-const ATHLETE_ROW_ID = "self";
 
 function parseDaysPerWeek(raw: unknown): number | undefined {
   const n = typeof raw === "string" ? parseInt(raw, 10) : undefined;
   return n != null && Number.isFinite(n) ? n : undefined;
 }
 
-function getAthleteRow(): AthleteRow | null {
-  const row = db.select().from(athleteMeasurements).where(eq(athleteMeasurements.id, ATHLETE_ROW_ID)).get();
-  return row ? (JSON.parse(row.fieldsJson) as AthleteRow) : null;
-}
-
 /*
- * `getAthleteParams` used to live here and read the stored row directly. It
- * is now imported from athleteStateService, which is the ONE read path:
+ * `getAthleteRow` / `saveAthleteRow` now come from athleteRowStore.ts — they
+ * were copied verbatim here, in benchmarksService and in athleteStateService.
+ *
+ * `getAthleteParams` used to live here too and read the stored row directly.
+ * It is now imported from athleteStateService, which is the ONE read path:
  * stored row → entered benchmarks → newest weigh-in, all folded at read
  * time. A second copy here would mean a weigh-in changed the plan's numbers
  * but not /api/athlete, which is exactly the drift the read-time fold exists
  * to prevent.
  */
-
-function saveAthleteRow(row: AthleteRow): void {
-  const fieldsJson = JSON.stringify(row);
-  const now = new Date().toISOString();
-  const existing = db.select().from(athleteMeasurements).where(eq(athleteMeasurements.id, ATHLETE_ROW_ID)).get();
-  if (existing) {
-    db.update(athleteMeasurements).set({ fieldsJson, updatedAt: now }).where(eq(athleteMeasurements.id, ATHLETE_ROW_ID)).run();
-  } else {
-    db.insert(athleteMeasurements).values({ id: ATHLETE_ROW_ID, fieldsJson, updatedAt: now }).run();
-  }
-}
 
 /** Returns the outcomeLog row's id — the caller needs it back to record the real outcome later via /api/outcomes/:id/record. */
 function logPrediction(kind: string, goalId: string | null, prediction: unknown): string {
@@ -518,7 +514,15 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
     const today = clientToday(req);
     const requested = typeof req.query.date === "string" ? req.query.date : today;
     if (!isValidISODate(requested)) return res.status(400).json({ error: "date must be YYYY-MM-DD" });
-    res.json(buildWeek({ date: requested, today, daysPerWeek: parseDaysPerWeek(req.query.daysPerWeek) }));
+    /*
+     * `daysPerWeek` falls back to what the athlete told the survey, not to
+     * the prescriber's own default of 5. Before the survey existed nothing
+     * ever sent this, so someone who trains three days a week got five
+     * sessions with nowhere to say otherwise. An explicit query param still
+     * wins — that's what-if territory.
+     */
+    const daysPerWeek = parseDaysPerWeek(req.query.daysPerWeek) ?? preferredTrainingDays();
+    res.json(buildWeek({ date: requested, today, daysPerWeek }));
   });
 
   /*
@@ -815,6 +819,57 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
   });
 
   // ─── Onboarding chat (Phase 4) ──────────────────────────────────────────
+  /*
+   * ─── The survey (Phase 11) ────────────────────────────────────────────
+   *
+   * `state` is what the client routes on: no completion stamp and the app
+   * opens on the survey instead of the plan, every time, until it is done.
+   * Server-side rather than in the browser, so clearing site data on a phone
+   * doesn't hand the survey to someone whose database is already full of
+   * goals.
+   */
+  app.get("/api/onboarding/state", (_req, res) => {
+    res.json(getBuildState());
+  });
+
+  app.post("/api/onboarding/survey", (req, res) => {
+    try {
+      res.status(201).json(completeSurvey(req.body, clientToday(req)));
+    } catch (e) {
+      if (e instanceof InvalidSurveyError) return res.status(400).json({ error: e.message });
+      // Not an error the athlete caused: the survey was already finished, so
+      // finishing it again would duplicate every goal it created.
+      if (e instanceof SurveyAlreadyCompleteError) return res.status(409).json({ error: e.message });
+      if (e instanceof InvalidGoalError) return res.status(400).json({ error: e.message });
+      throw e;
+    }
+  });
+
+  /** Reads the athlete's own description back into a DRAFT of the form. Writes nothing — see surveyInterpret.ts. */
+  app.post("/api/onboarding/interpret", async (req, res) => {
+    const narrative = (req.body ?? {}).narrative;
+    if (typeof narrative !== "string") return res.status(400).json({ error: "narrative must be a string" });
+    res.json(await interpretNarrative(narrative, clientToday(req)));
+  });
+
+  /*
+   * Delete this app. The only route back to the survey — see surveyService's
+   * RESET contract for what goes and what survives.
+   *
+   * `confirm: "DELETE"` in the body, not a query flag: this is the one
+   * endpoint here that destroys data an athlete cannot get back, and a
+   * mis-routed or replayed POST should bounce off it rather than take the
+   * app apart.
+   */
+  app.post("/api/onboarding/reset", (req, res) => {
+    const body = (req.body ?? {}) as { confirm?: unknown; eraseHistory?: unknown };
+    if (body.confirm !== "DELETE") return res.status(400).json({ error: 'send { "confirm": "DELETE" } to delete this app' });
+    if (body.eraseHistory !== undefined && typeof body.eraseHistory !== "boolean") {
+      return res.status(400).json({ error: "eraseHistory must be true or false" });
+    }
+    res.json(resetApp({ eraseHistory: body.eraseHistory === true }));
+  });
+
   app.get("/api/onboarding/history", (_req, res) => {
     res.json(
       db

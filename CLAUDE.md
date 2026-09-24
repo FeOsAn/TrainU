@@ -618,11 +618,114 @@ causes a support conversation.
   recording the span before `closeCondition` overwrites `updatedAt`, so it
   wants its own migration.
 
+- **Phase 11 (done)** — one front door, and the app looks like a product.
+
+  Until now TrainU opened on whatever tab you last used, with no way in for
+  someone who had never used it: the goal model had to exist before anything
+  could be assembled off it, and the only thing that created one was a chat
+  that needs an `ANTHROPIC_API_KEY`. So the app had no beginning.
+
+  **The survey** (`shared/onboarding/survey.ts`, `client/src/pages/Survey.tsx`)
+  is that beginning — seven steps, and the whole app until it is finished.
+  `appBuild.completedAt` is the switch `App.tsx` routes on: unset and you get
+  the survey every time, set and you never see it again. Stored server-side
+  rather than as a browser flag, because a phone that cleared its site data
+  would otherwise be handed the survey on top of a database already full of
+  goals — and finishing it would duplicate every one of them.
+
+  Two rules it is built around:
+  - **It finishes offline.** Dictation is the browser's own Web Speech API
+    (`client/src/lib/dictation.ts`) — no key, no audio leaving the device, live
+    interim text — and it is progressive enhancement: unsupported in Firefox,
+    so the microphone simply isn't rendered and every field is typed into
+    instead. The narrative read-back (`server/surveyInterpret.ts`, which turns
+    the spoken paragraph into a DRAFT of the form) is one optional button that
+    says plainly when no key is set. A front door that needs a paid service to
+    open is not a front door.
+  - **Optional means optional.** Every physiological number can be skipped, and
+    skipping it leaves a seed that says on the Athlete page that it is a guess.
+    Onboarding is exactly where an app is tempted to demand numbers nobody has
+    and then treat the invented ones as facts.
+
+  Nothing the survey collects is stored and read by nothing — the Phase 8
+  `physiqueTracking` mistake. `trainingDaysPerWeek` in particular is now the
+  default for `GET /api/plan/week`: before this the client never sent it and
+  the prescriber always used its own 5, so someone who trains three days a week
+  got five sessions with nowhere to say otherwise.
+
+  **"Delete this app"** (`client/src/components/DeleteApp.tsx`) is the only
+  route back, and `server/surveyService.ts` states the contract once:
+  BLUEPRINT (goals, preferences, block overrides, the answers, the coach
+  transcript, the gap queue, **and any stored Garmin/Whoop credential**) always
+  goes; HISTORY (sessions, tick-offs, weigh-ins, check-ins, conditions,
+  predictions) is opt-in, off by default, and keeping it makes the rebuilt app
+  better because it starts from real numbers rather than seeds. A test finishes
+  a survey against an empty database, deletes everything, and fails if ANY
+  table still holds rows — so a later phase that writes somewhere new cannot
+  silently leave part of the old app behind.
+
+  **The redesign.** Self-hosted Inter and Sora (both variable, both in the
+  bundle — Google Fonts would mean the app renders wrong offline, which is the
+  environment it was built in), a bottom tab bar on a phone and a top bar on a
+  laptop, and colour that means something: green is the plan and what's done,
+  violet is you and your app's own shape, amber is a number the app guessed,
+  red is a warning or a deletion.
+
+  **Three defects found by building it, not by a failing test:**
+  1. **A measured kilometre left two stale seeds behind it.** An athlete who
+     told the survey they run 19:30 for 5 km got a measured 3:32/km fresh
+     kilometre next to a 4:40/km "5 km pace" and a **5:54/km easy pace** — both
+     still derived from the seed threshold of a different athlete. Not
+     cosmetic: `prescribe.ts` prints threshold and interval paces off the
+     kilometre and easy pace off `runEasySecPerKm`, so one session card mixed a
+     real number with a seed. `withDerivedRunningPaces` now re-derives them at
+     read time in `athleteParamsFromRow`, over seeds only (a real measured easy
+     pace from logged runs still wins) and staying `verified: false`, because
+     derived is not measured and every confidence band downstream must keep
+     saying so. Live: easy pace moved 5:54 → 4:48/km. The derivation constants
+     moved next to the field they convert, beside `FRESH_KM_TO_THRESHOLD`, and
+     `calibration.ts` imports them rather than keeping its own copies.
+  2. **Six test files had never run.** `npm test` hand-listed nine globs, and
+     `shared/onboarding/` was not among them — caught because the total read
+     637 where it should have read 656. Behind that: every `client/src/**`
+     test written in Phase 10 (29 of them) had never run either. The glob is
+     now `client/**`, `server/**`, `shared/**`, so a new directory cannot be
+     silently excluded. 691 tests.
+  3. **"Delete this app" deleted it and left you looking at it.** The reset
+     succeeded, the server reported no build state, and the browser sat on the
+     settings page: `queryClient.clear()` removes queries out from under the
+     observers still mounted on them, so nothing refetched. It is now a full
+     reload, which is also the honest thing at the one moment everything in
+     memory describes an app that no longer exists.
+
+  Also extracted: `getAthleteRow`/`saveAthleteRow` existed verbatim in three
+  files before onboarding needed a fourth (`server/athleteRowStore.ts`).
+
+  691 tests, `tsc` clean, production build green. **Verified in a real browser
+  at 430×900 phone width**: the survey end to end into a built app — six
+  sessions for a 6-day week, HYROX-specific work, a real goal conflict against
+  the Christmas goal, "Not built yet" gaps — then delete → survey → reload →
+  still the survey, with the measured kilometre surviving as history and the
+  goals gone. Against the **production bundle** on an empty volume: 16 tables
+  migrated, both fonts loaded from the built assets, 401 on the new endpoints
+  without a cookie, a wrong password rejected. An edge-case battery on the four
+  new endpoints (resubmit, bad confirm, non-boolean flag, non-string narrative,
+  empty and array bodies) returning clean 400s and 409s with **zero 5xx**.
+
+  **Known limitation**: the survey asks for 3–7 training days because
+  `prescribeWeek` clamps to that range, and it says so on screen rather than
+  accepting 2 and quietly building 3. Someone who genuinely trains twice a week
+  is not served yet; lowering the floor changes every quality list, so it wants
+  doing deliberately.
+
 ## Client
 
-Everything above was API-only until the client was built — five routes under
-`client/src/pages/`, wired with wouter + react-query against `client/src/lib/api.ts`
-(same-origin, since the Express server serves the Vite middleware):
+Everything above was API-only until the client was built. Since Phase 11 the
+app opens on the sign-in gate, then the survey if it has never been built, and
+only then on the routes below — wired with wouter + react-query against
+`client/src/lib/api.ts` (same-origin, since the Express server serves the Vite
+middleware), assembled into a bottom tab bar on a phone and a top bar on a
+laptop:
 
 - **Plan** (`/`) — the hero, because the arbitration engine is the product.
   Since Phase 7 it opens on this week's actual sessions, day by day, each with
@@ -640,11 +743,13 @@ Everything above was API-only until the client was built — five routes under
 - **Goals** (`/goals`), **Coach** (`/coach`, the onboarding chat),
   **Data** (`/data` — training load, connectors, calibration, sessions).
 
-Styling is hand-rolled CSS adapting sub5-dashboard's `docs/design-system.md`
-tokens (flat panels on hairline borders, one accent, display numerals for
-metrics), with system fonts rather than Google Fonts — this app has to render
-correctly with no outbound network at all, which is exactly the situation in
-the sandbox it was built in.
+Styling is hand-rolled CSS in `client/src/index.css`. Phase 11 replaced the
+one-face, one-accent adaptation of sub5-dashboard's `docs/design-system.md`
+with a real type scale (Sora for headlines and numbers, Inter for sentences)
+and a palette where every colour means something. Both fonts are variable and
+**vendored into the bundle** rather than fetched from Google Fonts — this app
+has to render correctly with no outbound network at all, which is exactly the
+situation in the sandbox it was built in.
 
 **Verified in a real browser, not just compiled**: Chromium via Playwright
 (installed with `--no-save`, so it is deliberately not a project dependency)
@@ -659,12 +764,16 @@ rendered on screen.
 
 ## What's next
 
-**Deploy it and use it.** Everything below needs things this environment
-cannot provide, and each is the first real test of a phase that has only ever
-been verified synthetically: connect a real Garmin/Whoop account or import an
+**Deploy it and use it.** Phase 11 means a deployed instance is now usable by
+someone who has never seen it: sign in, talk at it for a minute, and the app
+exists. Everything below needs things this environment cannot provide, and each
+is the first real test of a phase that has only ever been verified
+synthetically: connect a real Garmin/Whoop account or import an
 Apple Health export (Phase 5), have the onboarding chat hold a real multi-turn
-conversation with an `ANTHROPIC_API_KEY` set (Phase 4), and start logging real
-outcomes so Phase 6's calibration has something to say.
+conversation with an `ANTHROPIC_API_KEY` set (Phase 4 — and with it, the
+survey's "read it back", whose clamp is tested but whose prompt has never seen
+a real paragraph), and start logging real outcomes so Phase 6's calibration has
+something to say.
 
 Phase 10 adds a fourth, and it is the one that compounds: **tick sessions off
 every week.** The two deferred features — learning what you actually do, and

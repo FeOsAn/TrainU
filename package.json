@@ -12,7 +12,7 @@
     "start": "NODE_ENV=production node dist/index.js",
     "check": "tsc",
     "pretest": "rm -f trainu.test.db trainu.test.db-shm trainu.test.db-wal",
-    "test": "DB_PATH=./trainu.test.db node --import tsx --test --test-concurrency=1 shared/*.test.ts shared/predictors/*.test.ts shared/arbitration/*.test.ts shared/prescription/*.test.ts shared/prescription/adjustments/*.test.ts shared/pacing/*.test.ts shared/appShell/*.test.ts server/*.test.ts server/connectors/*.test.ts",
+    "test": "DB_PATH=./trainu.test.db node --import tsx --test --test-concurrency=1 \"client/**/*.test.ts\" \"server/**/*.test.ts\" \"shared/**/*.test.ts\"",
     "posttest": "rm -f trainu.test.db trainu.test.db-shm trainu.test.db-wal",
     "db:push": "drizzle-kit push"
   },

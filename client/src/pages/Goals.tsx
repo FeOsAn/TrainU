@@ -97,7 +97,7 @@ export default function Goals() {
                   {GOAL_TYPE_LABELS[goal.type]} · {goal.successCriteria}
                 </span>
               </div>
-              <div style={{ textAlign: "right" }}>
+              <div style={{ textAlign: "right", flexShrink: 0, whiteSpace: "nowrap" }}>
                 <div className="display-num" style={{ fontSize: 20 }}>
                   {days >= 0 ? days : "—"}
                 </div>
