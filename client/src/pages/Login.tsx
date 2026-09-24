@@ -8,6 +8,9 @@ import { api } from "../lib/api";
  * Not an account system — one shared password for one athlete (see
  * server/auth.ts). It exists because a hosted TrainU holds a real Garmin
  * password and a full training history behind a URL anyone can guess.
+ *
+ * Locally, with no APP_PASSWORD set, this never renders: the server reports
+ * authenticated and App.tsx goes straight to the survey or the plan.
  */
 export default function Login({ onAuthenticated }: { onAuthenticated: () => void }) {
   const queryClient = useQueryClient();
@@ -31,27 +34,27 @@ export default function Login({ onAuthenticated }: { onAuthenticated: () => void
   }
 
   return (
-    <div className="page" style={{ maxWidth: 380, marginTop: "12vh" }}>
-      <div className="page-header">
-        <div className="kicker">TrainU</div>
-        <h1>Sign in</h1>
+    <div className="survey">
+      <div className="gate">
+        <div className="survey-brand" style={{ fontSize: 19, marginBottom: 30 }}>
+          <span className="logo-mark" style={{ width: 26, height: 26, borderRadius: 9 }} aria-hidden="true" />
+          TrainU
+        </div>
+
+        <h1 className="display">One plan,<br />all your goals.</h1>
+        <p className="lede">A race and a wedding six weeks apart don't have to fight. Sign in to pick up where you left off.</p>
+
+        <form className="panel" onSubmit={submit}>
+          <label className="field" style={{ marginBottom: 0 }}>
+            <span className="section-label">Password</span>
+            <input autoFocus type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
+          </label>
+          {error && <div className="notice notice-danger" style={{ margin: "14px 0 0" }}>{error}</div>}
+          <button type="submit" className="btn-primary btn-lg" disabled={busy || !password} style={{ marginTop: 16, width: "100%" }}>
+            {busy ? "Checking…" : "Sign in"}
+          </button>
+        </form>
       </div>
-      <form className="panel" onSubmit={submit}>
-        <label>
-          <span className="section-label">Password</span>
-          <input
-            autoFocus
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="••••••••"
-          />
-        </label>
-        {error && <div className="notice notice-danger" style={{ marginTop: 12 }}>{error}</div>}
-        <button type="submit" disabled={busy || !password} style={{ marginTop: 14, width: "100%" }}>
-          {busy ? "Checking…" : "Sign in"}
-        </button>
-      </form>
     </div>
   );
 }

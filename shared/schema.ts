@@ -270,3 +270,26 @@ export const physiqueEntries = sqliteTable(
     dateUnique: uniqueIndex("physique_entries_date_unique").on(table.date),
   }),
 );
+
+/**
+ * One row (id "self"): what the app was built from, and whether it has been
+ * built at all.
+ *
+ * `completedAt` is the switch the client routes on — null means a fresh
+ * install that opens on the survey, set means it opens on the plan and never
+ * shows the survey again unless the athlete deletes the app. It is stored
+ * server-side rather than in the browser on purpose: a phone that cleared its
+ * site data would otherwise be handed the survey again on top of a database
+ * already full of goals.
+ *
+ * `answersJson` is the SurveyAnswers snapshot (shared/onboarding/survey.ts).
+ * The app is assembled from the goals and preferences those answers WROTE,
+ * not from this blob — it is kept so "Your app" can show what was said, and
+ * so the survey can be resumed or re-opened prefilled rather than from blank.
+ */
+export const appBuild = sqliteTable("app_build", {
+  id: text("id").primaryKey(),
+  completedAt: text("completed_at"),
+  answersJson: text("answers_json").notNull().default("{}"),
+  updatedAt: text("updated_at").notNull(),
+});

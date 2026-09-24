@@ -22,7 +22,8 @@
 import { eq } from "drizzle-orm";
 import { db } from "./db";
 import { athleteMeasurements, trainingSessions } from "@shared/schema";
-import { type AthleteParams, type AthleteRow, athleteParamsFromRow } from "@shared/athlete";
+import { type AthleteParams, athleteParamsFromRow } from "@shared/athlete";
+import { getAthleteRow } from "./athleteRowStore";
 import { addDays } from "@shared/dates";
 import { type Condition, crossTrainingAvailability } from "@shared/conditions";
 import type { Readiness } from "@shared/readiness";
@@ -38,7 +39,6 @@ import { listGoals } from "./goalsService";
 import { getAppShell } from "./appShellService";
 
 /** Single-athlete app: the same row every other athlete read and write uses. */
-const ATHLETE_ROW_ID = "self";
 
 /**
  * How far back logged sessions are loaded for the weekly load ceiling.
@@ -59,11 +59,6 @@ export const LOAD_HISTORY_DAYS = 120;
  * this app has already been bitten by once.
  */
 export const CONDITION_HISTORY_DAYS = 60;
-
-function getAthleteRow(): AthleteRow | null {
-  const row = db.select().from(athleteMeasurements).where(eq(athleteMeasurements.id, ATHLETE_ROW_ID)).get();
-  return row ? (JSON.parse(row.fieldsJson) as AthleteRow) : null;
-}
 
 /**
  * The athlete's numbers as everything downstream should read them: the

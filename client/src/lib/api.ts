@@ -8,6 +8,9 @@ import type { PlannedSession, SessionKind } from "@shared/prescription/sessionKi
 import type { CalibrationReport } from "@shared/calibrationReport";
 import type { ConnectorPreferences, FeaturePreferences } from "@shared/preferences";
 import type { AssembledApp } from "@shared/appShell/assemble";
+import type { SurveyAnswers } from "@shared/onboarding/survey";
+import type { BuildState, ResetResult } from "../../../server/surveyService";
+import type { InterpretResult } from "../../../server/surveyInterpret";
 
 /*
  * The types the pages render come from the modules that DECLARE them —
@@ -32,6 +35,7 @@ export type { PhysiqueEntry, PhysiqueEntryInput, MetricTrend, PhysiqueMetric, Ph
 export type { PacingResult, PacingPlan, PacingUnavailable } from "@shared/pacing/pacing";
 export type { GoalPatch, WhatIfResult } from "@shared/arbitration/whatIf";
 export type { AssembledApp };
+export type { SurveyAnswers, SurveyGoalAnswer, RecentEffort } from "@shared/onboarding/survey";
 
 import type { CompletionStatus, CompletionReason, CompletionFeedback, CompletionFollowUp } from "@shared/prescription/completion";
 import type { Condition, ConditionInput, ConditionPatch } from "@shared/conditions";
@@ -54,6 +58,7 @@ export interface BlockChoiceRow {
 }
 
 /** The week as `GET /api/plan/week` returns it — the server's own type, not a second copy of it. */
+export type { BuildState, ResetResult, InterpretResult };
 export type PlanWeek = WeekView;
 export type PlanDay = WeekView["days"][number];
 export type PlanSession = WeekSession;
@@ -182,6 +187,17 @@ export const api = {
   // ─── What if I changed a goal? ────────────────────────────────────────
   whatIf: (body: { patch: GoalPatch; fromDate?: string; toDate?: string }) =>
     request<WhatIfResult>("/api/plan/what-if", { method: "POST", body: JSON.stringify(body) }),
+
+  /** The switch the whole app routes on: no build state, no app — you get the survey. See server/surveyService.ts. */
+  buildState: () => request<BuildState>("/api/onboarding/state"),
+  // `today` goes in the query string because that is where clientToday() reads
+  // it — one rule for the client's own calendar day, not one per endpoint.
+  submitSurvey: (answers: SurveyAnswers) =>
+    request<BuildState>(`/api/onboarding/survey${query({ today: todayStr() })}`, { method: "POST", body: JSON.stringify(answers) }),
+  interpretNarrative: (narrative: string) =>
+    request<InterpretResult>(`/api/onboarding/interpret${query({ today: todayStr() })}`, { method: "POST", body: JSON.stringify({ narrative }) }),
+  deleteApp: (eraseHistory: boolean) =>
+    request<ResetResult>("/api/onboarding/reset", { method: "POST", body: JSON.stringify({ confirm: "DELETE", eraseHistory }) }),
 
   chatHistory: () => request<Array<{ role: "user" | "assistant"; content: string; createdAt: string }>>("/api/onboarding/history"),
   chat: (message: string) => request<{ reply: string; toolResults: string[] }>("/api/onboarding/chat", { method: "POST", body: JSON.stringify({ message }) }),
