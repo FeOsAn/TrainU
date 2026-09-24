@@ -25,8 +25,12 @@ import type { Express, NextFunction, Request, Response } from "express";
 const COOKIE = "trainu_session";
 const MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
 
-/** Paths that must work before the athlete has authenticated. */
-const PUBLIC_API = new Set(["/api/auth/login", "/api/auth/status"]);
+/**
+ * Paths that must work before the athlete has authenticated. `/api/health` is
+ * Railway's healthcheck, which has no cookie; it reveals nothing but whether
+ * this deployment can serve.
+ */
+const PUBLIC_API = new Set(["/api/auth/login", "/api/auth/status", "/api/health"]);
 
 function password(): string | undefined {
   const raw = process.env.APP_PASSWORD;
@@ -99,9 +103,20 @@ export function registerAuth(app: Express): void {
   });
 }
 
-/** Gate every /api route that isn't explicitly public. */
+/**
+ * Gate every /api route that isn't explicitly public.
+ *
+ * Mount it as `app.use("/api", requireAuth)`, so that what counts as "the
+ * API" is decided by the same router that dispatches to the handlers. It used
+ * to be mounted globally and test `req.path.startsWith("/api")` — but Express
+ * matches routes case-INsensitively, so `/API/goals` sailed past this check
+ * and straight into the `/api/goals` handler, and every read and write in the
+ * app was open to anyone who typed the path in capitals. The comparison below
+ * is lowercased as well, so the gate holds however it is mounted.
+ */
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
-  if (!req.path.startsWith("/api") || PUBLIC_API.has(req.path)) return next();
+  const fullPath = (req.baseUrl + req.path).toLowerCase();
+  if (!fullPath.startsWith("/api") || PUBLIC_API.has(fullPath)) return next();
   if (isAuthenticated(req)) return next();
 
   if (process.env.NODE_ENV === "production" && !password()) {

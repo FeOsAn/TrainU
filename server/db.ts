@@ -105,7 +105,7 @@ export const db = drizzle(sqlite);
  * a restart against an up-to-date database is a no-op.
  */
 function migrationsFolder(): string {
-  // Resolved relative to this file so it works from `tsx server/index.ts` in
+  // Resolved relative to this file so it works from `tsx server/dev.ts` in
   // development and from the esbuild bundle at dist/index.js in production,
   // which have different __dirname values.
   const here = path.dirname(fileURLToPath(import.meta.url));

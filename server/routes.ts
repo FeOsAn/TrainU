@@ -58,6 +58,7 @@ import { connectGarmin, syncGarmin } from "./connectors/garmin";
 import { exchangeWhoopCode, getWhoopAuthorizationUrl, syncWhoop } from "./connectors/whoop";
 import { importAppleHealthExport } from "./connectors/appleHealth";
 import { getAppShell, listBlockChoices, listGapQueue, recordGaps } from "./appShellService";
+import { deploymentProblems } from "./health";
 import { getCalibrationMultiplier, getCalibrationReport, OutcomeNotFoundError, recordOutcome } from "./calibrationService";
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -202,7 +203,11 @@ export function clientToday(req: { query: Record<string, unknown> }): string {
 }
 
 export async function registerRoutes(_httpServer: Server, app: Express) {
+  // Public — see auth.ts PUBLIC_API. Railway calls this, with no cookie,
+  // before routing traffic to a new deployment; health.ts says what it checks.
   app.get("/api/health", (_req, res) => {
+    const problems = deploymentProblems();
+    if (problems.length) return res.status(503).json({ ok: false, problems });
     res.json({ ok: true });
   });
 
@@ -865,7 +870,9 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
     try {
       res.json({ url: getWhoopAuthorizationUrl(randomUUID()) });
     } catch (e: any) {
-      res.status(500).json({ error: e?.message ?? "WHOOP_CLIENT_ID/WHOOP_REDIRECT_URI not configured" });
+      // Not configured is a deliberate refusal about this deployment, not a
+      // fault in it — 503, never the 500 an actual crash produces.
+      res.status(503).json({ error: `Whoop is not configured on this server: ${e?.message ?? "WHOOP_CLIENT_ID/WHOOP_REDIRECT_URI missing"}` });
     }
   });
 

@@ -1,0 +1,38 @@
+# Every push runs what a deploy would, on the Node version the deploy runs.
+#
+# The first Railway deployment failed in ways no local check could see,
+# because every local check ran TypeScript source under tsx with every
+# devDependency installed. The smoke step runs the other configuration: a
+# clean export of the commit, built and then pruned to production
+# dependencies, booted with railway.json's own start command on an empty
+# volume. Turn on "Wait for CI" in the Railway service's settings and a
+# commit that fails here never deploys.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reads engines.node from package.json — one place decides the version,
+      # for CI, for the Railway builder, and for scripts/build-server.mjs.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: package.json
+          cache: npm
+
+      - run: npm ci
+      - name: Type-check
+        run: npm run check
+      - name: Unit tests
+        run: npm test
+      - name: Production build
+        run: npm run build
+      - name: Production smoke (clean export -> build -> prune dev deps -> boot -> probe)
+        run: npm run smoke -- --ref HEAD
