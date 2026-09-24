@@ -301,6 +301,20 @@ check(
   fit.text.slice(0, 300),
 );
 
+// A VALID file through the production worker: dist/fitParseWorker.js on
+// plain node, with only production dependencies installed.
+const valid = new FormData();
+valid.append("file", new Blob([readFileSync(path.join(app, "server", "fixtures", "run-5k.fit"))]), "run-5k.fit");
+const upload = await request(s1, "POST", "/api/sessions/fit-upload", { cookie, body: valid });
+check(
+  upload.status === 201 && upload.json?.sport === "run" && upload.json?.distanceKm === 5 && upload.json?.durationMinutes === 25,
+  `a valid FIT file parses in the production worker into a session (${upload.status})`,
+  upload.text.slice(0, 300),
+);
+const again = new FormData();
+again.append("file", new Blob([readFileSync(path.join(app, "server", "fixtures", "run-5k.fit"))]), "run-5k.fit");
+check((await request(s1, "POST", "/api/sessions/fit-upload", { cookie, body: again })).status === 409, "uploading it again is caught as a duplicate");
+
 logIsClean(s1, "boot #1");
 await stop(s1, "boot #1");
 

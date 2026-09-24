@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { looksLikeFitFile, parseFitBufferSafely, resolveFitWorker } from "./fitIngest";
@@ -121,4 +121,29 @@ test("the build emits the worker beside the server bundle", () => {
     existsSync(path.resolve(process.cwd(), "dist/fitParseWorker.js")),
     "dist/index.js exists but dist/fitParseWorker.js does not — the second esbuild entry point is missing",
   );
+});
+
+/*
+ * ─── A valid file, end to end ───────────────────────────────────────────────
+ *
+ * Until this fixture existed, every FIT test fed the parser garbage and
+ * checked that it failed cleanly — nothing had ever shown the path produces a
+ * session from a VALID file. See fixtures/make-run-5k.mjs for what the
+ * fixture is (and is not: it's valid FIT, but synthetic).
+ */
+test("a valid FIT file parses in the isolated worker into the session it describes", async () => {
+  const buffer = readFileSync(path.resolve(process.cwd(), "server/fixtures/run-5k.fit"));
+  assert.ok(looksLikeFitFile(buffer));
+  const parsed = await parseFitBufferSafely(buffer);
+  assert.deepEqual(parsed, {
+    date: "2026-09-20",
+    sport: "run",
+    title: "Run — 5.0km",
+    startTime: "2026-09-20T07:00:00.000Z",
+    durationMinutes: 25,
+    distanceKm: 5,
+    avgPaceSecPerKm: 300,
+    avgHeartRate: 150,
+    maxHeartRate: 162,
+  });
 });
