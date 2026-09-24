@@ -7,9 +7,11 @@
  */
 import { execFile, type ExecFileException } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import FitParser from "fit-file-parser";
 import type { Sport, TrainingSession } from "../shared/session";
 
@@ -86,8 +88,43 @@ export function looksLikeFitFile(buffer: Buffer): boolean {
   return buffer.toString("ascii", 8, 12) === ".FIT";
 }
 
-const TSX_BIN = path.resolve(process.cwd(), "node_modules/.bin/tsx");
-const WORKER_SCRIPT = path.resolve(import.meta.dirname, "fitParseWorker.ts");
+/*
+ * `import.meta.dirname` is Node >= 20.11. This app deployed onto Node 18,
+ * where it is `undefined` — and because the old code resolved the worker path
+ * at MODULE SCOPE, `path.resolve(undefined, …)` threw during import and killed
+ * the whole server before it could listen. Nothing to do with FIT files; the
+ * app simply would not boot. `fileURLToPath(import.meta.url)` is the portable
+ * spelling and works on every version.
+ */
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Where the parse actually runs, resolved LAZILY — a path problem must fail
+ * the one upload that needs it, never the process.
+ *
+ * The old version hardcoded `tsx` from `node_modules/.bin` and pointed at the
+ * TypeScript SOURCE. Neither survives a production install: `--omit=dev`
+ * strips tsx, and `dist/` contains no `.ts`. So this path had never once
+ * worked outside dev — the boot crash was hiding a broken feature, not
+ * causing one.
+ *
+ * Built form first (the worker is its own esbuild entry point, so
+ * `dist/fitParseWorker.js` sits beside `dist/index.js` and runs on plain
+ * `node`), falling back to the source under tsx when running from `server/`.
+ */
+export function resolveFitWorker(dir: string = HERE): { bin: string; args: string[] } {
+  const bundled = path.resolve(dir, "fitParseWorker.js");
+  if (existsSync(bundled)) return { bin: process.execPath, args: [bundled] };
+
+  const source = path.resolve(dir, "fitParseWorker.ts");
+  const tsx = path.resolve(process.cwd(), "node_modules/.bin/tsx");
+  if (existsSync(source) && existsSync(tsx)) return { bin: tsx, args: [source] };
+
+  throw new Error(
+    `No FIT parse worker next to ${dir}. Expected fitParseWorker.js (built) or fitParseWorker.ts plus tsx (dev). ` +
+      `If this is a deployed build, the worker is missing from dist — check the esbuild entry points in package.json.`,
+  );
+}
 
 /**
  * Parse a FIT file with the actual (untrusted, third-party) parsing
@@ -110,7 +147,8 @@ export async function parseFitBufferSafely(buffer: Buffer, timeoutMs = 10_000): 
   try {
     await writeFile(filePath, buffer);
     const { stdout } = await new Promise<{ stdout: string }>((resolve, reject) => {
-      execFile(TSX_BIN, [WORKER_SCRIPT, filePath], { timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      const worker = resolveFitWorker();
+      execFile(worker.bin, [...worker.args, filePath], { timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
         if (err) {
           if ((err as ExecFileException).killed || (err as ExecFileException).signal) {
             return reject(new Error(`FIT parse timed out after ${timeoutMs}ms and was killed — the file is likely corrupt`));
