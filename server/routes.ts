@@ -22,7 +22,7 @@ import { arbitratePlan } from "@shared/arbitration/arbitrate";
 import { type PlannedSession, type SessionKind } from "@shared/prescription/sessionKinds";
 import { followUpFor, type CompletionReason, type CompletionStatus } from "@shared/prescription/completion";
 import { InvalidCompletionError, listCompletions, recordCompletion } from "./completionsService";
-import { createGoal, InvalidGoalError, listGoals } from "./goalsService";
+import { createGoal, deleteGoal, GoalNotFoundError, InvalidGoalError, listGoals } from "./goalsService";
 import { buildWeek, checkInSummaries } from "./weekService";
 import { getAthleteParams, plannableConditions } from "./athleteStateService";
 import { getAthleteRow, saveAthleteRow } from "./athleteRowStore";
@@ -217,6 +217,16 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
       res.status(201).json(createGoal(req.body ?? {}));
     } catch (e) {
       if (e instanceof InvalidGoalError) return res.status(400).json({ error: e.message });
+      throw e;
+    }
+  });
+
+  app.delete("/api/goals/:id", (req, res) => {
+    try {
+      deleteGoal(req.params.id);
+      res.status(204).end();
+    } catch (e) {
+      if (e instanceof GoalNotFoundError) return res.status(404).json({ error: e.message });
       throw e;
     }
   });
@@ -458,9 +468,12 @@ export async function registerRoutes(_httpServer: Server, app: Express) {
     }
     // Same condition list and same `today` the week route uses, so a cut
     // paused by an open injury reads the same on both screens.
-    const plan = arbitratePlan(activeGoals, from, to, getAthleteParams(), plannableConditions(today), today);
-    logPrediction("plan:arbitration", null, plan);
-    res.json(plan);
+    // Not logged to outcome_log. It used to be — the whole multi-week plan,
+    // ~35 KB, on every Plan-page load — as a row that could never resolve
+    // (no outcomeId goes back to the client) and that getCalibrationReport
+    // then read in full on every pacing request. Migration 0004 removes the
+    // rows already written.
+    res.json(arbitratePlan(activeGoals, from, to, getAthleteParams(), plannableConditions(today), today));
   });
 
   // ─── The week: what to actually do, and what to eat ─────────────────────

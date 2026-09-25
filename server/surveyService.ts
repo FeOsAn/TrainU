@@ -60,9 +60,27 @@ export interface BuildState {
   answers: SurveyAnswers | null;
 }
 
+/**
+ * Whether this install already has goals — i.e. was built before the survey
+ * existed, or by the Goals form / coach rather than the survey.
+ *
+ * Phase 11's migration created `app_build` empty, so every existing install
+ * booted with no build row and opened on the survey; finishing it wrote a
+ * second copy of every goal. Migration 0003 backfills the row, and this makes
+ * the rule hold even on a volume the migration somehow missed: goals exist,
+ * so the app exists.
+ */
+function hasGoals(): boolean {
+  return Boolean(db.select({ id: goalsTable.id }).from(goalsTable).limit(1).get());
+}
+
 export function getBuildState(): BuildState {
   const row = db.select().from(appBuild).where(eq(appBuild.id, ROW_ID)).get();
-  if (!row) return { complete: false, completedAt: null, answers: null };
+  if (!row) {
+    return hasGoals()
+      ? { complete: true, completedAt: null, answers: null }
+      : { complete: false, completedAt: null, answers: null };
+  }
   let answers: SurveyAnswers | null = null;
   try {
     const parsed = JSON.parse(row.answersJson);
@@ -99,7 +117,7 @@ export function preferredTrainingDays(): number | undefined {
  * every one of them.
  */
 export function completeSurvey(raw: unknown, today: string = todayISO()): BuildState {
-  if (getBuildState().complete) {
+  if (getBuildState().complete || hasGoals()) {
     throw new SurveyAlreadyCompleteError("this app has already been built — delete it first if you want to start over");
   }
   validateSurvey(raw, today);

@@ -79,6 +79,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     if (res.status === 401) throw new UnauthorizedError(message);
     throw new Error(message);
   }
+  if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
@@ -99,6 +100,7 @@ export const api = {
     successCriteria: string;
     targetMetrics?: Record<string, unknown>;
   }) => request<Goal>("/api/goals", { method: "POST", body: JSON.stringify(goal) }),
+  deleteGoal: (id: string) => request<void>(`/api/goals/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
   athlete: () => request<AthleteParams>("/api/athlete"),
   patchAthlete: (fields: Record<string, number>) => request<AthleteParams>("/api/athlete", { method: "PATCH", body: JSON.stringify(fields) }),
@@ -277,3 +279,8 @@ export const GOAL_TYPE_LABELS: Record<GoalType, string> = {
   strength: "Strength",
   general_fitness: "General fitness",
 };
+
+/** The latest goal date the server accepts (server/goalValidation.ts), for a date input's `max`. */
+export function tenYearsFrom(day: string): string {
+  return `${Number(day.slice(0, 4)) + 10}${day.slice(4)}`;
+}

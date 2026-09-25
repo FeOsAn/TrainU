@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, inArray, isNotNull } from "drizzle-orm";
 import { db } from "./db";
 import { outcomeLog } from "@shared/schema";
 import { computeCalibrationReport, type CalibrationRecord, type CalibrationReport } from "@shared/calibrationReport";
@@ -19,7 +19,14 @@ export function recordOutcome(id: string, actual: unknown): void {
 }
 
 export function getCalibrationReport(): CalibrationReport {
-  const rows = db.select().from(outcomeLog).all();
+  // Only the rows that can count, and only the columns that are read: this
+  // runs on every prediction and pacing request, and outcome_log grows for
+  // as long as the athlete uses the app.
+  const rows = db
+    .select({ kind: outcomeLog.kind, predictionJson: outcomeLog.predictionJson, actualJson: outcomeLog.actualJson })
+    .from(outcomeLog)
+    .where(and(isNotNull(outcomeLog.actualJson), inArray(outcomeLog.kind, [...PROBABILITY_KINDS])))
+    .all();
   const records: CalibrationRecord[] = [];
 
   for (const row of rows) {

@@ -4,7 +4,7 @@ import { DEFAULT_ATHLETE } from "../athlete";
 import { measured } from "../measured";
 import type { Goal } from "../goal";
 import type { Condition } from "../conditions";
-import { arbitratePlan, arbitrateWeek } from "./arbitrate";
+import { arbitratePlan, arbitrateWeek, MAX_PLAN_WEEKS } from "./arbitrate";
 
 function goal(over: Partial<Goal>): Goal {
   return {
@@ -328,4 +328,20 @@ test("a SUSPENDED (stale) condition no longer pauses the cut — dead state must
     "maintenance",
     "a future week must judge staleness against today, not against the week it is planning",
   );
+});
+
+test("DEFECT: a goal dated 9999-12-31 plans two years, not 417,000 weeks", () => {
+  // This used to walk one week at a time to the goal date and run the server
+  // out of memory on the first Plan-page load.
+  const t0 = Date.now();
+  const plan = arbitratePlan([goal({ targetDate: "9999-12-31" })], "2026-09-21", "9999-12-31", DEFAULT_ATHLETE);
+  assert.ok(plan.weeks.length <= MAX_PLAN_WEEKS + 1, `${plan.weeks.length} weeks`);
+  assert.equal(plan.toDate, "2028-09-18", "the plan says where it stopped");
+  assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0}ms`);
+});
+
+test("a horizon inside the cap is untouched", () => {
+  const plan = arbitratePlan([goal({})], "2026-09-21", "2027-06-01", DEFAULT_ATHLETE);
+  assert.equal(plan.toDate, "2027-06-01");
+  assert.equal(plan.weeks.length, 37);
 });

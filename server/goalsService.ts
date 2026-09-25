@@ -1,3 +1,4 @@
+import { eq } from "drizzle-orm";
 /**
  * Goal persistence — pulled out of routes.ts so the onboarding chat's
  * create_goal tool (server/onboarding.ts) and the REST endpoint go through
@@ -67,4 +68,18 @@ export function createGoal(input: CreateGoalInput): Goal {
     })
     .run();
   return goal;
+}
+
+export class GoalNotFoundError extends Error {}
+
+/**
+ * Remove a goal. The app had no way to do this at all, so a goal entered with
+ * the wrong date, or the duplicates Phase 11's survey could write over an
+ * existing install, could only be removed with SQL on the volume. Everything
+ * the athlete DID (sessions, tick-offs, predictions) is untouched: those are
+ * history, and a goal is only the plan.
+ */
+export function deleteGoal(id: string): void {
+  const result = db.delete(goals).where(eq(goals.id, id)).run();
+  if (result.changes === 0) throw new GoalNotFoundError(`No goal with id ${id}`);
 }

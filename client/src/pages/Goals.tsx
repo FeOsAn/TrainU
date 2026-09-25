@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, daysUntil, GOAL_TYPE_LABELS, todayStr } from "../lib/api";
+import { api, daysUntil, GOAL_TYPE_LABELS, tenYearsFrom, todayStr } from "../lib/api";
 import { useSurfaceBlocks } from "../lib/appShell";
 import { WhatIfPanel } from "../components/WhatIfPanel";
 import { type Discipline, type GoalType, defaultDiscipline } from "@shared/goal";
@@ -75,6 +75,13 @@ export default function Goals() {
     },
   });
 
+  // Goals drive everything — the plan, the assembled app, pacing — so after a
+  // removal every cached answer is stale.
+  const remove = useMutation({
+    mutationFn: (id: string) => api.deleteGoal(id),
+    onSuccess: () => queryClient.invalidateQueries(),
+  });
+
   const canSubmit = label.trim() && targetDate && successCriteria.trim() && !create.isPending;
 
   return (
@@ -109,6 +116,17 @@ export default function Goals() {
               <span>{goal.targetDate}</span>
               <span className={`pill ${goal.priority === 1 ? "pill-verified" : "pill-neutral"}`}>priority {goal.priority}</span>
             </div>
+
+            <button
+              className="btn-ghost"
+              style={{ marginTop: 12, marginRight: 8, padding: "6px 12px", fontSize: 12 }}
+              disabled={remove.isPending}
+              onClick={() => {
+                if (window.confirm(`Remove "${goal.label}"? Your logged sessions stay; only the goal goes.`)) remove.mutate(goal.id);
+              }}
+            >
+              Remove
+            </button>
 
             {/* Only for a goal that is still ahead of you — there is nothing to try out about a race that has happened. */}
             {canWhatIf && goal.active && goal.targetDate >= todayStr() && (
@@ -169,7 +187,7 @@ export default function Goals() {
         <div className="grid grid-2">
           <label>
             <span className="section-label">Target date</span>
-            <input type="date" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} />
+            <input type="date" value={targetDate} max={tenYearsFrom(todayStr())} onChange={(e) => setTargetDate(e.target.value)} />
           </label>
           <label>
             <span className="section-label">Priority</span>

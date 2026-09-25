@@ -276,6 +276,12 @@ const goal = await request(s1, "POST", "/api/goals", {
   body: { type: "endurance_race", discipline: "run", label: "Smoke marathon", targetDate: "2027-04-18", successCriteria: "Finish" },
 });
 check(goal.status === 201 && goal.json?.id, `a real write: POST /api/goals → ${goal.status}`, goal.text.slice(0, 200));
+// An install with goals is a built app. Phase 11 shipped with this false for
+// every existing install, which sent the athlete back through the survey —
+// and finishing it duplicated every goal. This smoke run created that exact
+// state and passed, because it only checked for 5xx.
+const state = await request(s1, "GET", "/api/onboarding/state", { cookie });
+check(state.status === 200 && state.json?.complete === true, `an install with goals reads as built, not as a survey to redo (${state.text.slice(0, 80)})`);
 const week = await request(s1, "GET", "/api/plan/week", { cookie });
 check(week.status === 200, `the plan builds on a fresh volume: GET /api/plan/week → ${week.status}`, week.text.slice(0, 200));
 

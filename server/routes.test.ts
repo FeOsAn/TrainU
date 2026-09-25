@@ -15,7 +15,7 @@ import express from "express";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { db } from "./db";
-import { conditions, goals, physiqueEntries, preferences, sessionCompletions, trainingSessions } from "@shared/schema";
+import { conditions, goals, outcomeLog, physiqueEntries, preferences, sessionCompletions, trainingSessions } from "@shared/schema";
 import { addDays, startOfWeek, todayISO, weekdayOf } from "@shared/dates";
 import { registerRoutes } from "./routes";
 import { plannableConditions } from "./athleteStateService";
@@ -209,4 +209,22 @@ test("DEFECT: the Athlete page's weight field gets the same typo confirmation th
   assert.equal(ordinary.body.warning, undefined);
 
   db.delete(physiqueEntries).run();
+});
+
+test("DEFECT: a goal can be removed — there was no way to, short of SQL on the volume", async () => {
+  const created = await call("POST", "/api/goals", { type: "strength", label: "Duplicate", targetDate: addDays(UTC_TODAY, 60), successCriteria: "x" });
+  assert.equal(created.status, 201);
+  assert.equal((await call("DELETE", `/api/goals/${created.body.id}`)).status, 204);
+  const after = await call("GET", "/api/goals");
+  assert.ok(!after.body.some((g: { id: string }) => g.id === created.body.id));
+  assert.equal((await call("DELETE", `/api/goals/${created.body.id}`)).status, 404, "deleting it twice is a 404, not a 500");
+});
+
+test("DEFECT: opening the Plan page does not write to outcome_log", async () => {
+  // It used to log the whole multi-week plan (~35 KB) on every load, as a
+  // row nothing could ever resolve.
+  await call("POST", "/api/goals", { type: "endurance_race", label: "Plan-log probe", targetDate: addDays(UTC_TODAY, 120), successCriteria: "x" });
+  const before = db.select().from(outcomeLog).all().length;
+  for (let i = 0; i < 3; i++) assert.equal((await call("GET", "/api/plan/arbitrate")).status, 200);
+  assert.equal(db.select().from(outcomeLog).all().length, before);
 });

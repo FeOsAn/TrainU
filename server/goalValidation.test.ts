@@ -38,3 +38,21 @@ test("rejects a non-positive priority", () => {
 test("priority is optional — omitting it is valid", () => {
   assert.doesNotThrow(() => validateGoalInput(input({ priority: undefined })));
 });
+
+test("DEFECT: a placeholder or typo'd far-future date is rejected, not planned toward", () => {
+  const base = { type: "endurance_race" as const, label: "Race", successCriteria: "Finish" };
+  // Each of these used to be accepted, and 9999-12-31 ran the server out of memory.
+  for (const targetDate of ["9999-12-31", "2207-05-01", "2037-01-01"]) {
+    assert.throws(() => validateGoalInput({ ...base, targetDate }, "2026-09-25"), InvalidGoalError, targetDate);
+  }
+  assert.doesNotThrow(() => validateGoalInput({ ...base, targetDate: "2036-09-20" }, "2026-09-25"), "ten years out is a real plan");
+  assert.doesNotThrow(() => validateGoalInput({ ...base, targetDate: "2026-03-01" }, "2026-09-25"), "a goal that just finished can still be logged");
+  assert.throws(() => validateGoalInput({ ...base, targetDate: "2024-01-01" }, "2026-09-25"), InvalidGoalError);
+});
+
+test("DEFECT: a rolled-over date like 2026-02-30 is rejected, not silently read as 2 March", () => {
+  assert.throws(
+    () => validateGoalInput({ type: "strength", label: "x", successCriteria: "y", targetDate: "2027-02-30" }, "2026-09-25"),
+    InvalidGoalError,
+  );
+});

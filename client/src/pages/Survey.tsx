@@ -21,7 +21,7 @@
  */
 import { useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { api, todayStr, type SurveyAnswers, type SurveyGoalAnswer } from "../lib/api";
+import { api, tenYearsFrom, todayStr, type SurveyAnswers, type SurveyGoalAnswer } from "../lib/api";
 import {
   DISCIPLINE_LABELS,
   EMPTY_SURVEY,
@@ -421,7 +421,7 @@ function GoalCard({
 
       <label className="field">
         <span className="section-label">{goal.type === "general_fitness" ? "Check in by" : "When is it?"}</span>
-        <input type="date" value={goal.targetDate} min={today} onChange={(e) => onChange({ targetDate: e.target.value })} />
+        <input type="date" value={goal.targetDate} min={today} max={tenYearsFrom(today)} onChange={(e) => onChange({ targetDate: e.target.value })} />
       </label>
 
       {(goal.type === "endurance_race" || goal.type === "hyrox") && (

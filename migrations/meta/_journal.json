@@ -22,6 +22,20 @@
       "when": 1790279918125,
       "tag": "0002_flippant_nick_fury",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1790364732518,
+      "tag": "0003_backfill_app_build",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1790364769775,
+      "tag": "0004_drop_unresolvable_plan_logs",
+      "breakpoints": true
     }
   ]
 }

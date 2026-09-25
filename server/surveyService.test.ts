@@ -257,3 +257,29 @@ test.after(() => {
   wipe();
   db.run(sql`SELECT 1`);
 });
+
+/*
+ * ─── Installs that existed before the survey ────────────────────────────────
+ *
+ * Phase 11's migration created app_build empty. Every existing install booted
+ * with goals and no build row, opened on the survey, and finishing it wrote a
+ * second copy of every goal — with no way to delete a goal to undo it.
+ */
+test("DEFECT: goals with no build row read as a built app, not as a survey to fill in", () => {
+  wipe();
+  db.insert(goalsTable).values({
+    id: "pre-survey", type: "endurance_race", discipline: "run", label: "Ironman Barcelona", targetDate: "2027-10-03",
+    priority: 1, successCriteria: "Finish", targetMetricsJson: "{}", constraintsJson: "[]", active: true, createdAt: "2026-09-01T00:00:00.000Z",
+  } as any).run();
+  assert.equal(getBuildState().complete, true);
+});
+
+test("DEFECT: the survey refuses to build over existing goals, even with no build row", () => {
+  wipe();
+  db.insert(goalsTable).values({
+    id: "pre-survey", type: "endurance_race", discipline: "run", label: "Ironman Barcelona", targetDate: "2027-10-03",
+    priority: 1, successCriteria: "Finish", targetMetricsJson: "{}", constraintsJson: "[]", active: true, createdAt: "2026-09-01T00:00:00.000Z",
+  } as any).run();
+  assert.throws(() => completeSurvey(answers(), TODAY), SurveyAlreadyCompleteError);
+  assert.equal(listGoals().length, 1, "no duplicate goals");
+});

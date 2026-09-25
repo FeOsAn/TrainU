@@ -240,18 +240,32 @@ function mergeContiguousConflicts(raw: GoalConflict[]): GoalConflict[] {
   return merged;
 }
 
+/**
+ * The furthest ahead a plan is ever computed: two years.
+ *
+ * Without it the loop below walked one week at a time to whatever date it was
+ * handed — and a goal dated 9999-12-31 (or a year typo'd 2207, or `?to=` on
+ * the route) meant 417,000 weeks, which ran the server out of memory on the
+ * first Plan-page load. Enforced HERE rather than at each call site, so the
+ * next caller cannot forget it; `whatIf.ts`'s MAX_HORIZON_WEEKS is the same
+ * two years for the same reason.
+ */
+export const MAX_PLAN_WEEKS = 104;
+
 export function arbitratePlan(
   goals: Goal[],
   fromDate: string,
-  toDate: string,
+  requestedToDate: string,
   athlete: AthleteParams,
   conditions: Condition[] = [],
   today: string = fromDate,
 ): ArbitratedPlan {
+  const cap = addDays(fromDate, MAX_PLAN_WEEKS * 7);
+  const toDate = requestedToDate > cap ? cap : requestedToDate;
   const weeks: ArbitratedWeek[] = [];
   const cursor = new Date(`${fromDate}T00:00:00Z`);
   const end = new Date(`${toDate}T00:00:00Z`);
-  while (cursor <= end) {
+  while (cursor <= end && weeks.length <= MAX_PLAN_WEEKS) {
     weeks.push(arbitrateWeek(goals, cursor.toISOString().slice(0, 10), athlete, conditions, today));
     cursor.setUTCDate(cursor.getUTCDate() + 7);
   }
