@@ -11,7 +11,10 @@ export default defineConfig({
     },
   },
   root: path.resolve(import.meta.dirname, "client"),
-  base: "./",
+  // "/" rather than "./": the app is always served from the root, and a
+  // relative base makes a nested URL (/goals/123, /athlete/) resolve its
+  // assets under that path — a blank page instead of the client's own 404.
+  base: "/",
   build: {
     outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,
