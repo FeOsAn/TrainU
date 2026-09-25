@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { api, daysUntil, todayStr, GOAL_TYPE_LABELS, type PlanDay, type PlanSession, type PlanWeek } from "../lib/api";
 import { useAppShell, useSurfaceBlocks } from "../lib/appShell";
+import { greeting, useAthleteName } from "../lib/buildState";
 import { CheckInStrip } from "../components/CheckInStrip";
 import { ConditionsPanel, type ConditionPrefill } from "../components/ConditionsPanel";
 import { SessionCard, type TickPatch } from "../components/SessionCard";
@@ -24,24 +25,28 @@ function ConflictCard({ conflict }: { conflict: GoalConflict }) {
   );
 }
 
+/** "21 Sep" rather than "2026-09-21" — a plan is read at a glance, and the year is never the question. */
+function shortDate(date: string): string {
+  return new Date(`${date}T00:00:00Z`).toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
+}
+
 function DayCard({ day, onTick, pending, showNutrition }: { day: PlanDay; onTick: (session: PlanSession, patch: TickPatch) => void; pending: boolean; showNutrition: boolean }) {
   const isToday = day.date === todayStr();
   const weekday = DAY_NAMES[(new Date(`${day.date}T00:00:00Z`).getUTCDay() + 6) % 7];
 
   return (
-    <div className="panel" style={isToday ? { borderColor: "rgba(36,204,107,0.35)" } : undefined}>
-      <div className="row" style={{ marginBottom: day.sessions.length ? 12 : 0 }}>
-        <div className="stack">
-          <span className="section-label" style={isToday ? { color: "var(--primary)" } : undefined}>
-            {weekday} {isToday ? "· today" : ""}
-          </span>
-          <span className="display-num" style={{ fontSize: 14 }}>{day.date}</span>
+    <div className={`panel day-card${isToday ? " day-today" : ""}`}>
+      <div className="day-head">
+        <div className="day-when">
+          <span className="day-name">{weekday}</span>
+          <span className="day-date">{shortDate(day.date)}</span>
+          {isToday && <span className="day-now">Today</span>}
         </div>
         {/* Gated with the rest of plan.nutrition — an athlete who switched
           * macro targets off should not still get them on every day card. */}
         {showNutrition && (
-          <div style={{ textAlign: "right" }}>
-            <div className="display-num" style={{ fontSize: 15 }}>{day.nutrition.kcal} kcal</div>
+          <div className="day-macros">
+            <div className="display-num day-kcal">{day.nutrition.kcal}<span>kcal</span></div>
             <div className="tiny muted">
               P{day.nutrition.proteinG} · F{day.nutrition.fatG} · C{day.nutrition.carbG}
             </div>
@@ -49,7 +54,7 @@ function DayCard({ day, onTick, pending, showNutrition }: { day: PlanDay; onTick
         )}
       </div>
 
-      {day.sessions.length === 0 && <div className="tiny muted">Rest day — adaptation happens here, not in the sessions.</div>}
+      {day.sessions.length === 0 && <div className="rest-note">Rest day — adaptation happens here, not in the sessions.</div>}
 
       {day.sessions.map((session) => (
         <SessionCard key={session.kind} session={session} pending={pending} onTick={(patch) => onTick(session, patch)} />
@@ -59,6 +64,7 @@ function DayCard({ day, onTick, pending, showNutrition }: { day: PlanDay; onTick
 }
 
 export default function Plan() {
+  const name = useAthleteName();
   const { data: shell } = useAppShell();
   const planBlocks = useSurfaceBlocks("plan");
   const queryClient = useQueryClient();
@@ -135,7 +141,9 @@ export default function Plan() {
     <div className="page">
       <div className="page-header">
         <div className="kicker">This week</div>
-        <h1>Your plan</h1>
+        {/* The name the survey asked for, used. Falls back to the plain title
+          * rather than to a hollow "Morning, athlete" when it was skipped. */}
+        <h1 className="display">{name ? `${greeting()}, ${name}` : "Your plan"}</h1>
       </div>
 
       {/*
@@ -174,10 +182,17 @@ export default function Plan() {
 
       {arbitrated && activeGoals.length > 0 && week && (
         <div className="panel panel-accent">
-          <div className={has("plan.nutrition") ? "grid grid-3" : "grid grid-2"}>
+          {/*
+            * Load and Week are numbers and sit side by side; the nutrition
+            * stance is a WORD and gets its own line below at word size.
+            * Sharing one three-up grid with them put "Maintenance" on screen
+            * at the size of a metric and pushed the week's volume onto a
+            * second row — three unlike things given one shape.
+            */}
+          <div className="grid grid-2">
             <div>
               <div className="section-label">Load</div>
-              <div className="display-num" style={{ fontSize: 22, marginTop: 4 }}>{arbitrated.loadMultiplier}×</div>
+              <div className="display-num stat-value">{arbitrated.loadMultiplier}×</div>
               {/*
                 * `week.phaseName` deliberately does NOT go here. It is a free
                 * string, not an enum with a label table, and it can read
@@ -186,17 +201,9 @@ export default function Plan() {
                 * week looks like this" below, which is where it belongs.
                 */}
             </div>
-            {has("plan.nutrition") && (
-              <div>
-                <div className="section-label">Nutrition</div>
-                <div className="display-num" style={{ fontSize: 22, marginTop: 4, textTransform: "capitalize" }}>
-                  {arbitrated.nutritionStance}
-                </div>
-              </div>
-            )}
             <div>
               <div className="section-label">Week</div>
-              <div className="display-num" style={{ fontSize: 22, marginTop: 4 }}>
+              <div className="display-num stat-value">
                 {week.totalMinutes}m
                 {/* What it was before the layer touched it — shown, not swapped out silently. */}
                 {week.original.totalMinutes !== week.totalMinutes && (
@@ -206,12 +213,32 @@ export default function Plan() {
               <div className="tiny muted">{week.totalTss} TSS</div>
             </div>
           </div>
-          <div className="tiny muted" style={{ marginTop: 10 }}>{week.note}</div>
+          {has("plan.nutrition") && (
+            <div className="row stat-line">
+              <span className="section-label">Nutrition</span>
+              <span className="stat-word">{arbitrated.nutritionStance}</span>
+            </div>
+          )}
+
+          <div className="tiny muted" style={{ marginTop: 12 }}>{week.note}</div>
           {week.adherence.adherenceRate !== null && (
-            <div className="tiny muted" style={{ marginTop: 6 }}>
-              Adherence {Math.round(week.adherence.adherenceRate * 100)}% — {week.adherence.completed} done,{" "}
-              {week.adherence.skipped} skipped of {week.adherence.prescribed} prescribed
-              {week.adherence.actualTss !== null && <> · {week.adherence.actualTss} of {week.totalTss} TSS done</>}.
+            <div style={{ marginTop: 12 }}>
+              <div className="row" style={{ marginBottom: 6 }}>
+                <span className="section-label">Adherence</span>
+                <span className="display-num" style={{ fontSize: 13 }}>{Math.round(week.adherence.adherenceRate * 100)}%</span>
+              </div>
+              {/*
+                * A bar rather than a sentence. "0 done, 0 skipped of 6
+                * prescribed" is four numbers to hold in your head at 6am to
+                * answer one question — how much of this week is behind me.
+                */}
+              <div className="meter" role="img" aria-label={`${week.adherence.completed} of ${week.adherence.prescribed} sessions done`}>
+                <span style={{ width: `${Math.round(week.adherence.adherenceRate * 100)}%` }} />
+              </div>
+              <div className="tiny muted" style={{ marginTop: 6 }}>
+                {week.adherence.completed} done, {week.adherence.skipped} skipped of {week.adherence.prescribed}
+                {week.adherence.actualTss !== null && <> · {week.adherence.actualTss} of {week.totalTss} TSS</>}
+              </div>
             </div>
           )}
         </div>

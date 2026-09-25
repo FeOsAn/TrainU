@@ -43,10 +43,13 @@ export function SessionCard({ session, onTick, pending }: { session: PlanSession
   const was = session.adjustedFrom;
 
   return (
-    <div className="surface-2" style={{ marginBottom: 8, opacity: status === "skipped" ? 0.55 : 1 }}>
+    /* `data-intensity` drives a colour stripe down the left edge in index.css:
+       what a session costs you is the first thing to read off a week, and it
+       was previously only a small grey word at the far right of the card. */
+    <div className={`session${status === "skipped" ? " session-skipped" : ""}`} data-intensity={session.intensity}>
       <div className="row" style={{ marginBottom: 6 }}>
         <div className="stack" style={{ minWidth: 0 }}>
-          <strong style={{ fontSize: 14 }}>{session.title}</strong>
+          <strong className="session-title">{session.title}</strong>
           <span className="tiny muted">
             {session.durationMinutes} min · {session.tss} TSS
             {/* The prescription this replaced, struck through rather than quietly gone. */}
@@ -74,13 +77,13 @@ export function SessionCard({ session, onTick, pending }: { session: PlanSession
         </div>
       )}
 
-      <ul style={{ margin: "0 0 8px", paddingLeft: 16 }}>
+      <ul className="targets">
         {session.targets.map((target, i) => (
-          <li key={i} className="tiny" style={{ lineHeight: 1.55 }}>{target}</li>
+          <li key={i}>{target}</li>
         ))}
       </ul>
 
-      <div className="tiny muted" style={{ marginBottom: 8, lineHeight: 1.5 }}>{session.note}</div>
+      <div className="tiny muted" style={{ marginBottom: 10, lineHeight: 1.5 }}>{session.note}</div>
 
       <div className="chip-row" style={{ justifyContent: "flex-start" }}>
         {COMPLETION_STATUSES.map((option) => (

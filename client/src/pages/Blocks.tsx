@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type BlockChoiceRow } from "../lib/api";
+import { useBuildState } from "../lib/buildState";
 import DeleteApp from "../components/DeleteApp";
 
 /**
@@ -28,6 +29,7 @@ function choiceLabel(row: BlockChoiceRow): string {
 export default function Blocks() {
   const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({ queryKey: ["block-choices"], queryFn: api.blockChoices });
+  const { data: build } = useBuildState();
 
   const patch = useMutation({
     mutationFn: (p: Record<string, "on" | "off" | null>) => api.patchBlocks(p),
@@ -55,6 +57,31 @@ export default function Blocks() {
         leaves them out. That's a default, not a verdict: switch anything on or off here, and{" "}
         <strong>let my goals decide</strong> hands it back.
       </div>
+
+      {/*
+        * What you said when you set this up, shown back.
+        *
+        * Not nostalgia: the app is assembled from the goals these words
+        * produced, and the commonest reason an assembled app stops fitting is
+        * that the words stopped being true. Seeing them is how you notice.
+        */}
+      {build?.answers?.narrative?.trim() && (
+        <div className="panel narrative">
+          <div className="row" style={{ alignItems: "flex-start" }}>
+            <span className="section-label">What you told it</span>
+            {build.completedAt && (
+              <span className="tiny muted" style={{ flexShrink: 0 }}>
+                {new Date(build.completedAt).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })}
+              </span>
+            )}
+          </div>
+          <blockquote>{build.answers.narrative.trim()}</blockquote>
+          <div className="tiny muted">
+            Still true? Change a goal on the Goals page, or start over below — this text is a record of what
+            the app was built from, not something it keeps re-reading.
+          </div>
+        </div>
+      )}
 
       {isLoading && <div className="panel"><div className="skeleton" style={{ width: "45%" }} /></div>}
       {patch.error && <div className="notice notice-danger">{(patch.error as Error).message}</div>}

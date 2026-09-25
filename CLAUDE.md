@@ -647,11 +647,26 @@ causes a support conversation.
     Onboarding is exactly where an app is tempted to demand numbers nobody has
     and then treat the invented ones as facts.
 
-  Nothing the survey collects is stored and read by nothing — the Phase 8
-  `physiqueTracking` mistake. `trainingDaysPerWeek` in particular is now the
-  default for `GET /api/plan/week`: before this the client never sent it and
-  the prescriber always used its own 5, so someone who trains three days a week
-  got five sessions with nowhere to say otherwise.
+  `trainingDaysPerWeek` is now the default for `GET /api/plan/week`: before
+  this the client never sent it and the prescriber always used its own 5, so
+  someone who trains three days a week got five sessions with nowhere to say
+  otherwise.
+
+  **A correction, because this file only works if its claims are checkable.**
+  The commit that shipped the survey asserted that nothing it collects is
+  stored and read by nothing — the Phase 8 `physiqueTracking` mistake. That
+  claim was FALSE when written: `name` and `narrative` were asked for, stored
+  in `answersJson`, and rendered by nothing at all. Found by grepping for the
+  readers immediately afterwards, not by any test. Both are now read — `name`
+  greets the athlete on the Plan header (`client/src/lib/buildState.ts`),
+  `narrative` is shown back on "Your app" as what the app was assembled from,
+  which is also how an athlete notices it has gone stale. And the claim is now
+  a test rather than a sentence: `ANSWER_DESTINATIONS` in `survey.test.ts` maps
+  every key of `SurveyAnswers` to where its answer is read, `tsc` rejects a new
+  field that is missing from it, and a second test asserts that every field
+  claiming to be a write actually produces one. Asking someone a question and
+  then ignoring the answer is a small enough failure to keep making; it needed
+  a mechanism, not a good intention.
 
   **"Delete this app"** (`client/src/components/DeleteApp.tsx`) is the only
   route back, and `server/surveyService.ts` states the contract once:
@@ -690,7 +705,7 @@ causes a support conversation.
      637 where it should have read 656. Behind that: every `client/src/**`
      test written in Phase 10 (29 of them) had never run either. The glob is
      now `client/**`, `server/**`, `shared/**`, so a new directory cannot be
-     silently excluded. 691 tests.
+     silently excluded. 693 tests.
   3. **"Delete this app" deleted it and left you looking at it.** The reset
      succeeded, the server reported no build state, and the browser sat on the
      settings page: `queryClient.clear()` removes queries out from under the
@@ -701,7 +716,15 @@ causes a support conversation.
   Also extracted: `getAthleteRow`/`saveAthleteRow` existed verbatim in three
   files before onboarding needed a fourth (`server/athleteRowStore.ts`).
 
-  691 tests, `tsc` clean, production build green. **Verified in a real browser
+  **The daily screens got the design pass too**, not just the way in: day cards
+  with a weekday rail and today picked out, an intensity stripe down each
+  session (what it costs you was a small grey word at the far right), adherence
+  as a meter rather than four numbers to hold in your head at 6am, and the
+  nutrition stance moved off the metric grid — it is a word, and sharing a
+  three-up grid with two numbers put "Maintenance" on screen at the size of a
+  measurement while pushing the week's volume onto a second row.
+
+  693 tests, `tsc` clean, production build green. **Verified in a real browser
   at 430×900 phone width**: the survey end to end into a built app — six
   sessions for a 6-day week, HYROX-specific work, a real goal conflict against
   the Christmas goal, "Not built yet" gaps — then delete → survey → reload →

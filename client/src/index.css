@@ -1250,3 +1250,218 @@ td {
 .block-row .chip:disabled:not(.chip-on) {
   opacity: 0.4;
 }
+
+/* The athlete's own words, shown back on "Your app". */
+.narrative {
+  background: linear-gradient(165deg, var(--violet-soft), transparent 60%), var(--card);
+  border-color: var(--violet-line);
+}
+
+.narrative blockquote {
+  margin: 10px 0 12px;
+  padding-left: 13px;
+  border-left: 2px solid var(--violet);
+  font-size: 14.5px;
+  line-height: 1.65;
+  color: var(--muted-strong);
+  white-space: pre-wrap;
+}
+
+/* ─── The plan: day cards and sessions ────────────────────────────────── */
+
+.stat-value {
+  font-size: clamp(22px, 6vw, 27px);
+  margin-top: 3px;
+  line-height: 1.1;
+}
+
+.day-card {
+  padding: 15px;
+}
+
+/* Today is the only card that matters at 6am, so it gets the accent and a
+   lift off the page rather than a slightly different border colour. */
+.day-today {
+  border-color: var(--primary-line);
+  background: linear-gradient(165deg, rgba(62, 224, 141, 0.06), transparent 55%), var(--card);
+}
+
+.day-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.day-when {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.day-name {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.day-date {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.day-now {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--on-primary);
+  background: var(--primary);
+  border-radius: 999px;
+  padding: 3px 8px;
+}
+
+.day-macros {
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.day-kcal {
+  font-size: 16px;
+  line-height: 1.2;
+}
+
+.day-kcal span {
+  font-family: var(--font-body);
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-left: 4px;
+}
+
+.rest-note {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.5;
+  padding: 10px 0 2px;
+}
+
+.session {
+  position: relative;
+  overflow: hidden;
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  padding: 13px 14px 13px 16px;
+  margin-bottom: 9px;
+}
+
+.session:last-child {
+  margin-bottom: 0;
+}
+
+/*
+ * What a session costs you, read off the edge of the card before any of the
+ * words. It was a small grey label at the far right until now.
+ */
+.session::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--muted);
+}
+
+.session[data-intensity="hard"]::before {
+  background: linear-gradient(180deg, var(--danger), var(--warn));
+}
+
+.session[data-intensity="moderate"]::before {
+  background: var(--warn);
+}
+
+.session[data-intensity="easy"]::before {
+  background: var(--primary);
+}
+
+.session[data-intensity="rest"]::before {
+  background: var(--hairline-strong);
+}
+
+/* Still legible, still tickable — a skipped session is a record, not a deletion. */
+.session-skipped {
+  opacity: 0.55;
+}
+
+.session-title {
+  font-size: 14.5px;
+  font-weight: 650;
+  letter-spacing: -0.012em;
+}
+
+.targets {
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.targets li {
+  position: relative;
+  padding-left: 14px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--muted-strong);
+}
+
+.targets li::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 8.5px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--hairline-strong);
+}
+
+/* ─── Meter ───────────────────────────────────────────────────────────── */
+
+.meter {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.meter > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--primary), #6ef0ac);
+  transition: width 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .meter > span {
+    transition: none;
+  }
+}
+
+/* A stance is a word, not a metric — sized as one, on its own line. */
+.stat-line {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hairline);
+}
+
+.stat-word {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  text-transform: capitalize;
+}

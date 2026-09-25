@@ -210,3 +210,92 @@ test("a goal with no numbers at all gets words that read under its own name", ()
     assert.doesNotMatch(goal.successCriteria, /_/, "no enum ids reach the athlete");
   }
 });
+
+/* ─── Nothing collected goes unread ──────────────────────────────────── */
+
+/**
+ * Where each answer ends up. Every key of `SurveyAnswers` must appear here,
+ * and the test below fails until it does.
+ *
+ * This exists because two fields — `name` and `narrative` — were collected,
+ * stored and rendered by NOTHING, which is the exact mistake Phase 8 caught
+ * with `preferences.features.physiqueTracking`: onboarding asks, the athlete
+ * answers, and the answer vanishes. It was claimed fixed in the same commit
+ * that introduced it, and only found by grepping for the readers afterwards.
+ *
+ * "write" means `surveyToWrites` puts it into a goal, an athlete measurement,
+ * a weigh-in or a preference. "display" means a screen reads it back off
+ * `appBuild.answersJson` — named here so the claim is checkable rather than
+ * a comment. "engine" means the server reads it directly.
+ */
+const ANSWER_DESTINATIONS: Record<keyof SurveyAnswers, "write" | "display" | "engine" | "meta"> = {
+  version: "meta",
+  name: "display", // client/src/lib/buildState.ts → the Plan header's greeting
+  narrative: "display", // client/src/pages/Blocks.tsx → "What you told it"
+  ageYears: "write",
+  heightCm: "write",
+  weightKg: "write",
+  bodyFatPercent: "write",
+  trainingDaysPerWeek: "engine", // preferredTrainingDays() → GET /api/plan/week
+  hasBike: "write",
+  hasPool: "write",
+  recentEffort: "write",
+  maxHrBpm: "write",
+  lifts: "write",
+  ftpWatts: "write",
+  goals: "write",
+  connectors: "write",
+  physiqueTracking: "write",
+};
+
+test("every question the survey asks has somewhere its answer is read", () => {
+  const asked = Object.keys(EMPTY_SURVEY) as Array<keyof SurveyAnswers>;
+  const accounted = Object.keys(ANSWER_DESTINATIONS);
+  assert.deepEqual(
+    asked.filter((key) => !accounted.includes(key)),
+    [],
+    "a new survey field must declare where its answer is read — asking for something and then ignoring it is the mistake this test exists to stop",
+  );
+});
+
+test("...and every field claiming to be a write actually produces one", () => {
+  /*
+   * A full survey with every optional field populated: each key marked
+   * "write" must move at least one number, goal or preference. A field that
+   * is silently dropped by `surveyToWrites` fails here, rather than being
+   * discovered months later by an athlete wondering why their FTP never
+   * showed up.
+   */
+  const full: SurveyAnswers = {
+    ...answers(),
+    ageYears: 29,
+    heightCm: 181,
+    weightKg: 79,
+    bodyFatPercent: 13,
+    hasBike: true,
+    hasPool: true,
+    maxHrBpm: 191,
+    ftpWatts: 265,
+    lifts: { squat1RmKg: 140, deadlift1RmKg: 180, bench1RmKg: 100, ohp1RmKg: 60 },
+    recentEffort: { distanceKm: 5, timeSeconds: 1170, date: "2026-09-06" },
+    connectors: { garmin: true, whoop: true, appleHealth: true },
+    physiqueTracking: true,
+  };
+  const writes = surveyToWrites(full, TODAY);
+  const fields = new Set(writes.athlete.map((a) => a.field));
+
+  for (const key of ["ageYears", "heightCm", "maxHrBpm", "ftpWatts"] as const) {
+    assert.ok(fields.has(key), `${key} is declared a write and produced none`);
+  }
+  for (const lift of ["squat1RmKg", "deadlift1RmKg", "bench1RmKg", "ohp1RmKg"]) {
+    assert.ok(fields.has(lift), `${lift} is declared a write and produced none`);
+  }
+  assert.ok(fields.has("runThresholdSecPerKm"), "recentEffort is declared a write and produced none");
+  assert.equal(writes.weighIn.weightKg, 79);
+  assert.equal(writes.weighIn.bodyFatPercent, 13);
+  assert.deepEqual(writes.connectors, { garmin: true, whoop: true, appleHealth: true });
+  assert.equal(writes.features.physiqueTracking, true);
+  assert.equal(writes.features.hasBike, true);
+  assert.equal(writes.features.hasPool, true);
+  assert.ok(writes.goals.length > 0);
+});
